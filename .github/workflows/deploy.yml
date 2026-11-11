@@ -1,0 +1,45 @@
+name: deploy
+
+# main への push → テスト → ビルド → Cloudflare Workers へデプロイ。
+# シークレットは GitHub Actions の secrets/var に置く(リポジトリには載せない)。
+#   vars:    NUXT_PUBLIC_SUPABASE_URL, NUXT_PUBLIC_APP_URL(公開値)
+#   secrets: NUXT_PUBLIC_SUPABASE_KEY(publishable key でも可), CF_API_TOKEN, CF_ACCOUNT_ID
+# Workers の secret(GOOGLE_SERVICE_ACCOUNT_JSON)は初回にローカルで `wrangler secret put` する。
+# Actions から secret put はしない(鍵 JSON を Actions に載せないため)。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build (Cloudflare Workers preset)
+        run: npm run build
+        env:
+          NUXT_PUBLIC_SUPABASE_URL: ${{ vars.NUXT_PUBLIC_SUPABASE_URL }}
+          NUXT_PUBLIC_SUPABASE_KEY: ${{ secrets.NUXT_PUBLIC_SUPABASE_KEY }}
+          NUXT_PUBLIC_APP_URL: ${{ vars.NUXT_PUBLIC_APP_URL }}
+
+      - name: Deploy to Cloudflare Workers
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}

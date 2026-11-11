@@ -1,0 +1,19 @@
+{
+  // Cloudflare Workers のデプロイ設定。
+  // main/assets はここで確定させる(`npx wrangler deploy` / `wrangler dev` はこの config を読む)。
+  // nitro の deployConfig(自動生成の .output/server/wrangler.json)は CI/ローカルビルドでは有効にならないため、
+  // ルートのこのファイルが正になる。
+  "name": "hinotike",
+  "main": ".output/server/index.mjs",
+  "assets": { "binding": "ASSETS", "directory": ".output/public" },
+
+  // nodejs_compat は 2026-08-04 以降なら既定で ON。同期の JWT 署名(node:crypto フォールバック)が
+  // 必要なので date はそれより後ろにし、flag も明示しておく。
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // 公開情報のみ。シークレット(GOOGLE_SERVICE_ACCOUNT_JSON など)は `wrangler secret put` で登録する。
+  "vars": {
+    "NUXT_PUBLIC_APP_URL": "https://hinogakuenpta.org"
+  }
+}

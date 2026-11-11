@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="104" fill="#0f172a"/>
+  <!-- H の左バーと横梁 -->
+  <rect x="140" y="120" width="48" height="272" rx="12" fill="#38bdf8"/>
+  <rect x="188" y="232" width="136" height="48" rx="12" fill="#38bdf8"/>
+  <!-- H の右バー: QRモジュールの積み -->
+  <g fill="#38bdf8">
+    <rect x="324" y="120" width="48" height="48" rx="12"/>
+    <rect x="324" y="176" width="48" height="48" rx="12"/>
+    <rect x="324" y="232" width="48" height="48" rx="12"/>
+    <rect x="324" y="288" width="48" height="48" rx="12"/>
+    <rect x="324" y="344" width="48" height="48" rx="12"/>
+  </g>
+  <!-- 中央モジュールを finder 風に -->
+  <rect x="338" y="246" width="20" height="20" rx="6" fill="#0f172a"/>
+</svg>
