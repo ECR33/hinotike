@@ -31,6 +31,18 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      - name: Check required build variables
+        # ビルド時に焼き込む公開値が空だと「Supabase に繋がらない Worker」がデプロイされるので早期に落とす
+        run: |
+          if [ -z "$NUXT_PUBLIC_SUPABASE_URL" ] || [ -z "$NUXT_PUBLIC_SUPABASE_KEY" ] || [ -z "$NUXT_PUBLIC_APP_URL" ]; then
+            echo "不足: NUXT_PUBLIC_SUPABASE_URL(vars) / NUXT_PUBLIC_SUPABASE_KEY(secrets) / NUXT_PUBLIC_APP_URL(vars)"
+            exit 1
+          fi
+        env:
+          NUXT_PUBLIC_SUPABASE_URL: ${{ vars.NUXT_PUBLIC_SUPABASE_URL }}
+          NUXT_PUBLIC_SUPABASE_KEY: ${{ secrets.NUXT_PUBLIC_SUPABASE_KEY }}
+          NUXT_PUBLIC_APP_URL: ${{ vars.NUXT_PUBLIC_APP_URL }}
+
       - name: Build (Cloudflare Workers preset)
         run: npm run build
         env:

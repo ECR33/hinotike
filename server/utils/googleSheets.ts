@@ -14,7 +14,8 @@ import { sheetTitleFor } from '#shared/utils/sync'
 
 const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly'
-const SHEETS_API = 'https://www.googleapis.com/v4/spreadsheets'
+// Sheets API の host は sheets.googleapis.com(www.googleapis.com/v4 は 404 を返す)
+const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets'
 
 export interface ServiceAccountKey {
   client_email: string
