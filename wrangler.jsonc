@@ -12,8 +12,9 @@
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
 
-  // 公開情報のみ。シークレット(GOOGLE_SERVICE_ACCOUNT_JSON など)は `wrangler secret put` で登録する。
+  // 公開情報のみ。シークレット(GOOGLE_SERVICE_ACCOUNT_JSON など)はダッシュボードの Secrets か
+  // `wrangler secret put` で登録する(リポジトリに置かない)。
   "vars": {
-    "NUXT_PUBLIC_APP_URL": "https://hinogakuenpta.org"
+    "NUXT_PUBLIC_APP_URL": "https://hinotike.hinogakuenpta.org"
   }
 }

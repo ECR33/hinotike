@@ -160,16 +160,22 @@ Workers + Assets としてデプロイする。`nodejs_compat` を有効にす�
   `vars` に `NUXT_PUBLIC_APP_URL`)。ローカルで Workers の挙動を見るなら `npm run preview:cf`(`.dev.vars` を読む)。
 - 公開値はビルド時に焼き込む(`NUXT_PUBLIC_SUPABASE_URL` / `NUXT_PUBLIC_SUPABASE_KEY` は publishable key なので公開してよい)。
   `NUXT_PUBLIC_APP_URL` は `wrangler.jsonc` の vars で設定し、変更は `wrangler v1` の再デプロイで反映する。
-- シークレット(リポジトリに置かない): `npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON`(鍵 JSON の文字列)。
+- シークレット(リポジトリに置かない): Workers の Secret `GOOGLE_SERVICE_ACCOUNT_JSON`(鍵 JSON の文字列)。
+  初回は Cloudflare ダッシュボード → Workers & Pages → `hinotike` → Settings → Secrets → Add secret に貼る
+  (または `npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON`)。再デプロイでも残る。
   改行が `\n` エスケープのまま渡っても `server/utils/googleSheets.ts` の `normalizePrivateKey` が実改行に戻す。
-- GitHub Actions(`.github/workflows/deploy.yml`): main の push → `npm ci` → `npm test` → `npm run typecheck` → `npm run build` →
-  `npx wrangler deploy`(デプロイ認証は Cloudflare API token + account id を Actions の secrets から)。
-  `wrangler secret put` は Actions では実行しない(初回はローカルで 1回登録するか、ダッシュボードで設定)。
-- 配信ドメイン: Cloudflare 管理の `hinogakuenpta.org` に worker をカスタムドメインでバインドする
-  (ダッシュボードの Workers → custom domain、または `wrangler.jsonc` の `routes`/`custom_domain`)。
-- Supabase の URL Configuration は**バインドするホスト全部**で Site URL と
-  `<site-url>/api/auth-callback` を登録すること(PKCE verifier はオリジンの cookie にあるため、
-  未登録ホストからの認証は完結しない)。
+- GitHub Actions(`.github/workflows/deploy.yml`): main の push → `npm ci` → `npm test` → `npm run typecheck` →
+  (必須変数が空ならビルド前に失敗するガード)→ `npm run build` → `npx wrangler deploy`。
+  リポジトリ側で設定する値(Settings → Secrets and variables → Actions):
+  - vars: `NUXT_PUBLIC_SUPABASE_URL`(例 `https://<project-ref>.supabase.co`)、`NUXT_PUBLIC_APP_URL`(本番ホスト)
+  - secrets: `NUXT_PUBLIC_SUPABASE_KEY`(publishable key で可)、`CF_API_TOKEN`(Workers を deploy できる権限の token)、`CF_ACCOUNT_ID`
+  Actions から `wrangler secret put` はしない(鍵 JSON を Actions に載せないため)。
+- 配信ドメイン: 本番ホストは `https://hinotike.hinogakuenpta.org`。Cloudflare ダッシュボードの Workers →
+  `hinotike` → Settings → Custom domains に追加する(DNS レコードは自動作成される)。
+  同じホストを `wrangler.jsonc` の `vars.NUXT_PUBLIC_APP_URL` と GitHub の vars `NUXT_PUBLIC_APP_URL` に書く。
+- Supabase の URL Configuration は本番ホストで登録する: Site URL `https://hinotike.hinogakuenpta.org`、
+  Redirect URLs `https://hinotike.hinogakuenpta.org/api/auth-callback`(Google OAuth 側でも同じホストを
+  Authorized origins に含める)。未登録ホストからの認証は完結しない(PKCE verifier はオリジンの cookie にある)。
 - カメラ(PWA / `getUserMedia`)は HTTPS 必須 → Cloudflare の自動 TLS で満たされる。
 
 ## ローカル Supabase での開発・検証(Docker が使える環境)
@@ -181,7 +187,8 @@ npm run supabase:stop
 ```
 
 - `npm run dev` は `nuxt dev --dotenv .env.development` でローカル Supabase の dev デフォルトキーを読み、本番用の `.env` は dev では使わない(hosted Supabase の認証テストをしたいときは shell の env 変数で上書きできる)。
-- スキーマは start/reset で `supabase/migrations/*.sql`(0001→0002 の順)が自動適用される。ホスト版には同じファイルをこの順で SQL Editor に貼って実行(`supabase db push` でも追加マイグレーションを適用可)。
+- スキーマは start/reset で `supabase/migrations/*.sql`(0001→0002→0003 の順)が自動適用される。ホスト版には同じファイルをこの順で SQL Editor に貼って実行するか、`supabase db push` を使う。
+  hosted への `db push` は `npx supabase db push --remote=<project-ref>` で、**Supabase の access token(scoped: database_write)か DB のパスワード(`--password`)が必要**(service_role key では DB に繋がらない)。まず `--dry-run` で適用されるマイグレーションを確認する。
 - 統合テスト: `npm run test:local`(email 事前登録 → 初回ログインの `link_my_user()` 自動紐付け → `is_registered_user()` / items 閲覧 / 未登録拒否 + QR許可フロー: 依頼作成・再生成で旧nonce失効・preview/approve・ドメイン制限・consumed 再利用拒否を検証)。
 - **ローカルでは Google OAuth は使えない**(ローカル gotrue はサードパーティプロバイダ非対応)。UI 検証は dev 限定のパスワードログインで行う:
   ```bash
