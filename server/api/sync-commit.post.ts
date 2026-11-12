@@ -68,6 +68,22 @@ export default defineEventHandler(async (event): Promise<SyncCommitResponse> => 
 
   await upsertRows(event, settings.targetTable, mapped.rows)
 
+  // prune(削除): 設定で有効なときのみ。誤削除を防ぐガード —
+  // ワークシート名が不一致(フォールバック)のときと、取り込み対象 0 行のときは削除しない。
+  let deleted = 0
+  if (settings.pruneOnCommit) {
+    const worksheetMismatched = settings.worksheet !== null && settings.worksheet !== sheet.title
+    if (worksheetMismatched) {
+      console.warn(`[sync-commit] prune 中止: 設定のワークシート "${settings.worksheet}" ≠ 実際のシート "${sheet.title}"`)
+    } else if (mapped.rows.length === 0) {
+      console.warn('[sync-commit] prune 中止: 取り込み対象が 0 行(全行フィルタ除外または空シート)')
+    } else {
+      const sheetCodes = new Set(codes)
+      const stale = [...(await allCodes(event, settings.targetTable))].filter((c) => !sheetCodes.has(c))
+      deleted = await deleteCodes(event, settings.targetTable, stale)
+    }
+  }
+
   return {
     sheetTitle: sheet.title,
     targetTable: settings.targetTable,
@@ -76,5 +92,6 @@ export default defineEventHandler(async (event): Promise<SyncCommitResponse> => 
     updateCount,
     skipped: mapped.skipped,
     filtered: mapped.filtered,
+    deleted,
   }
 })

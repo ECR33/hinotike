@@ -57,6 +57,12 @@ export default defineEventHandler(async (event): Promise<SyncPreviewResponse> =>
   const updateCount = codes.filter((c) => existing.has(c)).length
   const insertCount = codes.length - updateCount
 
+  // prune 有効時は「今回のシートに無い code(削除予定)」をプレビューで見せる。
+  const sheetCodes = new Set(codes)
+  const deleteCount = settings.pruneOnCommit
+    ? [...(await allCodes(event, settings.targetTable))].filter((c) => !sheetCodes.has(c)).length
+    : 0
+
   return {
     sheetTitle: sheet.title,
     sheetTitles: sheet.titles,
@@ -68,6 +74,8 @@ export default defineEventHandler(async (event): Promise<SyncPreviewResponse> =>
     dataRows: dataRowCount,
     skipped: mapped.skipped,
     filtered: mapped.filtered,
+    pruneEnabled: settings.pruneOnCommit,
+    deleteCount,
     updateCount,
     insertCount,
     sample: mapped.rows.slice(0, 10),

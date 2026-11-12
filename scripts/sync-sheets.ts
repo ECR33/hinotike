@@ -53,6 +53,20 @@ function loadEnv(file: string): Record<string, string> {
   return env
 }
 
+/** CLI 側の全 code 取得(API の allCodes と同じ range ページング)。 */
+async function allTableCodes(supabase: ReturnType<typeof createClient>, table: string): Promise<Set<string>> {
+  const found = new Set<string>()
+  const PAGE = 1000
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase.from(table).select('code').range(from, from + PAGE - 1)
+    if (error) throw new Error(`全 code 照会失敗 (${table}): ${error.message}`)
+    const rows = data ?? []
+    for (const r of rows) if (typeof r.code === 'string') found.add(r.code)
+    if (rows.length < PAGE) break
+  }
+  return found
+}
+
 async function main() {
   const envFile = envFileFromArgs()
   const env = { ...loadEnv(path.join(ROOT, envFile)), ...process.env }
@@ -91,7 +105,7 @@ async function main() {
   const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
   const { data: row, error: rowError } = await supabase
     .from('sync_settings')
-    .select('spreadsheet_id, worksheet, code_column, include_columns, exclude_columns, filter_column, filter_values, rename, target_table')
+    .select('spreadsheet_id, worksheet, code_column, include_columns, exclude_columns, filter_column, filter_values, prune_on_commit, rename, target_table')
     .eq('id', 1)
     .maybeSingle()
   if (rowError) {
@@ -173,6 +187,28 @@ async function main() {
     if (error) {
       console.error(`upsert 失敗: ${error.message}`)
       process.exit(1)
+    }
+  }
+
+  // prune(API と同じガード: ワークシート不一致・取り込み 0 行では削除しない)。
+  if (settings.pruneOnCommit) {
+    if (settings.worksheet && settings.worksheet !== title) {
+      console.warn(`prune 中止: 設定のワークシート "${settings.worksheet}" ≠ 実際のシート "${title}"`)
+    } else if (mapped.rows.length === 0) {
+      console.warn('prune 中止: 取り込み対象が 0 行(全行フィルタ除外または空シート)')
+    } else {
+      const sheetCodes = new Set(codes)
+      const stale = [...(await allTableCodes(supabase, settings.targetTable))].filter((c) => !sheetCodes.has(c))
+      let deleted = 0
+      for (const part of chunk(stale, 100)) {
+        const { data: gone, error } = await supabase.from(settings.targetTable).delete().in('code', part).select('code')
+        if (error) {
+          console.error(`delete 失敗: ${error.message}`)
+          process.exit(1)
+        }
+        deleted += (gone ?? []).length
+      }
+      console.log(`prune: ${deleted}件を削除しました(シートに無い code)`)
     }
   }
 

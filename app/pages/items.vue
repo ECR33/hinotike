@@ -15,6 +15,10 @@
  * 後発の検索に負けた古い応答を捨て、乱順応答でリストが古い条件の結果に戻るのを防ぐ。
  * URL と検索条件は同期しない(タイプごとに router.replace しない。初期値だけ ?code=&name=&years=&groups= を読む)。
  *
+ * 行タップで /result に開いて一覧に戻ると、絞り込み条件・読み込み済みの行・スクロール位置を
+ * そのまま復活させる(keepalive。複数の絞り込み結果を1件ずつ開いて確認する用途)。
+ * 条件は URL に写らないので、画面更新(再SSR)では初期条件に戻る。
+ *
  * 年・組の絞り込み(折りたたみできる1つの欄)は2モード:
  *  - 単独選択: chip の多选択(app/components/FacetChipGroup.vue)。同一 facet 内は OR、年と組の間は AND。
  *  - 組み合わせ選択: 年×組のマトリクス(app/components/YearGroupMatrix.vue)。選んだセル(その年+その組)だけを対象、
@@ -52,6 +56,15 @@ interface ItemsFacets {
 
 /** 年・組の選択モード(単独選択は OR/AND、組み合わせ選択は年と組の対応)。 */
 type FacetMode = 'single' | 'pair'
+
+/**
+ * 一覧→照会結果→一覧 の往復でこのページの状態を残す。
+ * keepalive はクライアント側の保持(component instance + DOM を deactivate するだけ)なので
+ * SSR の描画は通常通り毎回走る。戻ったときに setup は再走しない=条件もfetchも引き継がれる。
+ * scrollToTop:false は既定の「別ページへ遷移したら top にスクロール」を止める
+ * (スクロールは navigation guard で去る時の位置に戻す。ブラウザの戻る操作も同じ位置になる)。
+ */
+definePageMeta({ keepalive: true, scrollToTop: false })
 
 const route = useRoute()
 
@@ -322,6 +335,10 @@ watch([codeInput, nameInput], () => {
 
 const sentinel = ref<HTMLElement | null>(null)
 let observer: IntersectionObserver | null = null
+/** keepalive の表示/非表示旗。非表示中に sentinel が「見えている」扱いになっても追記しない。 */
+let pageActive = true
+/** 一覧を去った時点のスクロール位置(戻ったときに同じ位置へ戻す)。 */
+let savedScrollY = 0
 
 /** sentinel(一覧の末尾)がまだ画面内か(下端から200px 手前を含む)。 */
 function sentinelVisible(): boolean {
@@ -333,9 +350,12 @@ function sentinelVisible(): boolean {
 
 /** sentinel が見えている限り次のページを追記する(IO の回调がない場合の自己継続もここで処理する)。 */
 async function loadMore(): Promise<void> {
-  if (loading.value || done.value) return
+  // 去った瞬間に in-flight の追記があると、nextTick の sentinelVisible は detach 済みで
+  // true(全 rect が 0)になるのでここで打ち切る(非表示中に全件を読み進めない)。
+  if (!pageActive || loading.value || done.value) return
   if (!sentinelVisible()) return
   await load({ reset: false })
+  if (!pageActive) return
   await nextTick()
   if (sentinelVisible()) await loadMore()
 }
@@ -359,6 +379,45 @@ onBeforeUnmount(() => {
   observer = null
   if (debounceTimer) clearTimeout(debounceTimer)
 })
+
+/**
+ * keepalive の activation/deactivation を navigation guard で扱う。
+ * Nuxt は page component そのものを cache しない(Suspense/RouteProvider の vnode を cache する)ので、
+ * page 側の onActivated/onDeactivated は呼ばれない(Vue の KeepAlive は cache された instance の
+ * hook しか invoke しない)。また route の reactive な path は DOM の差し替え後に変わるため
+ * 去る時の scrollY を正確に取れない。beforeEach(まだ一覧が DOM にある)で覚え、
+ * afterEach(再attach 済み)で戻す。
+ */
+if (import.meta.client) {
+  const router = useRouter()
+  const offLeave = router.beforeEach((to, from) => {
+    if (from.path !== '/items' || to.path === '/items') return
+    // 一覧を去る: 追記を止め、スクロール位置を覚え、入力の確定待ちを確定させる
+    // (戻ったとき一覧の条件が入力欄とズレない)
+    pageActive = false
+    savedScrollY = window.scrollY
+    if (debounceTimer) {
+      clearTimeout(debounceTimer)
+      debounceTimer = undefined
+      applyFilters()
+    }
+  })
+  const offBack = router.afterEach(async (to, from) => {
+    if (to.path !== '/items' || from.path === '/items') return
+    // 一覧に戻る: 表示中にしてから、去った時の位置へスクロールを戻し、追記を続ける。
+    // cached DOM の再attach は route 確定後の render で完了する(先に読むと高さが0でスクロールできない)
+    pageActive = true
+    await nextTick()
+    if (savedScrollY) window.scrollTo(0, savedScrollY)
+    // 復帰した位置に sentinel がまだ見えていれば追記を続ける(IO は再attach でも回调するが、
+    // 回调を待たずにここで補う。loading/done の旗があるので重複はしない)。
+    if (ioSupported.value) void loadMore()
+  })
+  onBeforeUnmount(() => {
+    offLeave()
+    offBack()
+  })
+}
 
 // 1ページ目と年・組の選択肢を SSR で解決して hydration に引き継ぐ(再fetch 防止)。
 // 1ページ目は初期条件が一致する缓存だけ再利用する(別条件の缓存を今の条件で使うと別の結果になる)。

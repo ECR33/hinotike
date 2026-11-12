@@ -13,7 +13,7 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
 | `/login` | 不要 | ログインページ(未認証時はグローバルミドルウェア从这里へ) |
 | `/scan` | 必要 | QRコードをカメラで連続スキャン(@zxing/library) |
 | `/result` | 必要 | QRの値(または一覧の行)で Supabase `items` を照会し、カード形式で結果表示 |
-| `/items` | 必要 | `items` のレコード一覧(スクロールで追記 + code/氏名のインクリメンタル検索 + 折りたたみできる年・組の絞り込み[単独 chip / 年×組マトリクス] + 条件リセット) |
+| `/items` | 必要 | `items` のレコード一覧(スクロールで追記 + code/氏名のインクリメンタル検索 + 折りたたみできる年・組の絞り込み[単独 chip / 年×組マトリクス] + 条件リセット + 行を開いても絞り込み状態を保持) |
 | `/unauthorized` | 不要(案内用) | Google認証済みだが users に紐付けがない場合の案内 + 許可依頼QR |
 | `/register` | 必要(登録済み) | 利用者登録画面: 許可依頼QRを読んで依頼者のemail確認 → 許可 |
 | `/share` | 必要(登録済み) | アプリ共有: アプリのトップURLのQRを表示。別のスマホのカメラ/QRリーダーで読むとトップが開き、未登録なら許可依頼フロー(/unauthorized)へ自動接続される。QRはドットスタイル描画(`app/components/QrDots.vue`、qrcode-vue3 の dot style 参考。既存の qrcode ライブラリの BitMatrix を SVG に描き直すだけ。finder は走査線比率 1:1:3:1:1 を保つ rounded 形なので jsQR/zxing/native リーダーで読める) |
@@ -48,6 +48,7 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
 - **ペアの照会**: `GET /api/items-list?pairs=1:3,2:1`(`shared/utils/items.ts` の `parsePair`/`normalizePairs`/`pairConditions`)。各ペアは 年 AND 組、ペア同士は OR。PostgREST の nested logic は `or=(and(payload->>"学年".eq."1",payload->>"クラス".eq."3"),and(...))` の形で、`and=(...)` ではなく `and(...)` の構文が必要(nested の `and=` は PGRST100 エラー)。パスは `payloadTextColumn(key)` の引用形(`payload->>"学年"`)で組み立て、値も `quoteInValue` で引用する(`.` `,` `"` を含む値でも安全)。単独選択(years/groups)と同時に送ると単独条件とペアの AND になるが、UI はモード切替でもう一方の選択を消すので同時に送らない(見えない選択が条件に残らない)。ペア上限は `ITEM_PAIR_MAX`(60)。
 - **選択肢(facets)**: `GET /api/items-facets` が items 全体の値と件数を返す(`GET /api/items-list` と同じ guard)。応答は `{ years, groups, pairs, missingPairs, scanned, truncated }`(`pairs` は 年と組の両方がある行のペア件数、`missingPairs` はどちらかが空の行の件数)。chip とマトリクスはこれだけで作り、現在の絞り込み結果には連動しない(絞り込みで選択肢が消えると「選べなくなった理由」が分からなくなるため)。年 or 組 が空のレコードはマトリクスで選べないが黙って減らさない(`missingPairs` を注記で出す)。スキャン上限(`ITEM_FACET_SCAN_LIMIT`)に達したら `truncated` を返し、UI に静かに注記する。SSR で解決して `useState` で hydration に引き継ぐ(初期条件が一致する時だけ 1ページ目を再利用する)。
 - **条件のリセット**: 「条件をリセット」ボタンで code・氏名・年・組・ペアを一度に消す(chip・マス・リセット・モード切替はデバウンスを待たずに即適用)。条件がなければボタンは無効。モード自体は維持する(絞り込み欄を開き直して続きを選ぶ)。
+- **行を開いても絞り込み状態は消えない**: ページは `definePageMeta({ keepalive: true, scrollToTop: false })`。行タップで `/result` に開いて一覧に戻ると(「一覧に戻る」でもブラウザの戻るでも)、入力・chip・マトリクスの選択・絞り込み欄の折りたたみ・読み込み済みの行・スクロール位置がそのまま復活する(`GET /api/items-list` の再fetch なし。絞り込み結果が複数あるとき1件ずつ開いて確認する用途)。keepalive はクライアント側の保持(component instance + DOM を deactivate するだけ)なので SSR の描画は毎回通常通り走る。表示/非表示の切替点は navigation guard で扱う — Nuxt は page component そのものを cache しない(Suspense/RouteProvider の vnode を cache する)ため、page 側の `onActivated`/`onDeactivated` は呼ばれない(Vue の KeepAlive は cache された instance の hook しか invoke しない)。`scrollToTop: false` は既定の「別ページへ遷移したら top にスクロール」を止めるので、去る時の位置を `scrollTo` で戻せる。去る時にデバウンス中の入力は確定させる(戻ったとき一覧の条件が入力欄とズレない)。非表示中は sentinel が detach 済みで「見えている」扱いになるため、`pageActive` の旗で追記を打ち切る(非表示中に全件を読み進めない)。条件は URL に写らないままなので、画面更新(再SSR)では URL の初期条件に戻る。
 - **行部品**: `app/components/ItemRow.vue`(年/組/氏名/code の4要素)。表示列を増やしたいときはこの部品に `payloadValue(payload, key)` を足すだけで、ページと API は変更不要(API は payload をそのまま返す)。行全体が `/result?code=…` のリンク(行の中は span だけにして入れ子のリンクを作らないので、行まるごとタップでスキャンと同じ照会結果画面へ遷移する。当たり面积は min-height 44px)。
 - **payload キーの集中**: 表示・検索に使うキーは `shared/utils/items.ts`(`ITEM_YEAR_KEY`/`ITEM_GROUP_KEY`/`ITEM_NAME_KEY`)。`scripts/columns.config.json`(rename 含む)と一致させること。
 - `/scan` の「手入力(テスト用)」欄は撤去した(dev 限定の gating はなく、本番でも常に表示されていた)。code を直接照会したい用途は `/items` の code 検索が同じ役割を果たす。
@@ -120,7 +121,7 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
    - 開発ホスト許可は `DEV_ALLOWED_HOSTS` / `NUXT_VITE_ALLOWED_HOST`(nuxt.config にホストをハードコードしない)
    - アプリサーバーは Secret key を使わない(items の insert/update は RLS の `is_registered_user()` で許可する。Secret key は CLI の同期だけ)
 3. Supabase 側:
-   - `supabase/migrations/0001_init.sql` → `supabase/migrations/0002_registration_requests.sql` → `supabase/migrations/0003_sync_settings.sql` → `supabase/migrations/0004_sync_row_filter.sql` を SQL Editor でこの順に実行(users / items / ドメイン表 / RLS / 関数 + 許可依頼の依頼テーブルと RPC + 同期設定テーブル `sync_settings` とシード行 + 行フィルタ列(filter_column / filter_values)。関数が RLS ポリシーより先に作成される順になっている)
+   - `supabase/migrations/0001_init.sql` → `supabase/migrations/0002_registration_requests.sql` → `supabase/migrations/0003_sync_settings.sql` → `supabase/migrations/0004_sync_row_filter.sql` → `supabase/migrations/0005_sync_prune.sql` を SQL Editor でこの順に実行(users / items / ドメイン表 / RLS / 関数 + 許可依頼の依頼テーブルと RPC + 同期設定テーブル `sync_settings` とシード行 + 行フィルタ列(filter_column / filter_values)+ prune 列(prune_on_commit)と items 削除ポリシー。関数が RLS ポリシーより先に作成される順になっている)
      - 旧スキーマからの移行は drop して再作成(items は再同期で復元)
    - Authentication → Third-party providers → Google を有効化
    - Authentication → URL Configuration:
@@ -137,6 +138,10 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
    - 取り込み設定は DB の `public.sync_settings`(singleton 行 id=1)が正。`/sync` 画面でスプレッドシート ID・
      ワークシート・code カラム・取り込みカラム(空 = 全カラム)・除外・行フィルタ(有効レコードを表すカラム名 + 許容値のリスト。リスト空 = そのカラムの値が非空なら有効。カラム名空 = フィルタなし)・rename・対象テーブルを編集し、
      「設定を保存」→「プレビュー」→「取り込みを確定」の順で実行する(確定は `confirm: true` 必須、5000行超は拒否)
+     - 行フィルタで除外された行やシートから消えた行は既定では items に残る(upsert のみ)。「確定時に削除も行う」
+       (`sync_settings.prune_on_commit`、マイグレーション 0005 の items 削除ポリシーが必要)を有効にすると、
+       確定時に「今回のシートで取り込み対象だった code に無い行」を削除する(プレビューに削除予定件数を表示)。
+       誤削除防止のガード: ワークシート名が不一致(フォールバック)のときと取り込み 0 行のときは削除しない
    - シート読み取りは Worker 側で行う(googleapis 不使用): サービスアカウント鍵から JWT(RS256)を自前署名し
      oauth2 の jwt-bearer grant で access token を取り、Sheets REST API(v4)を fetch で読む
    - 鍵は Worker の secret `GOOGLE_SERVICE_ACCOUNT_JSON`(鍵 JSON の文字列)に置く。本番の Worker は
@@ -204,7 +209,7 @@ npm run supabase:stop
   依頼者ウィンドウの /unauthorized の「許可を求める」で QR 表示 → 許可者ウィンドウの /register でカメラ読み(別画面の QR を Webcam で写す)→ email 確認 → 許可 → 依頼者側は polling で自動 /scan 遷移。
   API 一式の実挙動確認は `node scripts/verify-registration-flow.mjs`(dev サーバ + ローカル Supabase が必要)。
   bottom navigation の項目・アクティブ表示・コンテンツとの重なりは `node scripts/verify-bottom-nav.mjs` をヘッドレス Chrome で確認する(未認証 / 許可済み / 未登録の3状態。未登録テストユーザがないときはそのシナリオはスキップされる)。
-  `/items` のスクロール追記・インクリメンタル検索・行の code リンク・nav との重なり、絞り込み欄の折りたたみ、chip の OR/AND、マトリクスのペア(1年3組+2年1組 の件数と交差0件)は `node scripts/verify-items-page.mjs` をヘッドレス Chrome で確認する(dev サーバ + ローカル Supabase の items が必要)。
+  `/items` のスクロール追記・インクリメンタル検索・行の code リンク・nav との重なり、絞り込み欄の折りたたみ、chip の OR/AND、マトリクスのペア(1年3組+2年1組 の件数と交差0件)、行を開いて一覧に戻った時の絞り込み状態の保持(chip 選択・総件数・スクロール位置・再fetch なし、「一覧に戻る」とブラウザの戻るの両方)は `node scripts/verify-items-page.mjs` をヘッドレス Chrome で確認する(dev サーバ + ローカル Supabase の items が必要)。
   dev フォームと `/api/auth/dev-login` は本番ビルドでは無効(NODE_ENV=production で 404、UI 非表示)。hosted Supabase を指す dev(`npm run dev:tunnel`)でも無効になる(dev ユーザはローカルにしか存在しないため)。
 - メール確認リンクの確認は Mailpit (http://127.0.0.1:54324)。
 

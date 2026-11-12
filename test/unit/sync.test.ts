@@ -21,6 +21,7 @@ const base: SyncSettings = {
   excludeColumns: [],
   filterColumn: null,
   filterValues: [],
+  pruneOnCommit: false,
   rename: { '領収書が必要な方はチェックをお願いします。': '領収書' },
   targetTable: 'items',
 }
@@ -215,6 +216,14 @@ describe('normalizeSettings(UI 入力の正規化)', () => {
     expect(normalizeSettings({ filterValues: 'x' }).filterValues).toEqual([])
   })
 
+  it('pruneOnCommit は true のみ有効(文字列や欠落は false に補正)', () => {
+    expect(normalizeSettings({ pruneOnCommit: true }).pruneOnCommit).toBe(true)
+    expect(normalizeSettings({ pruneOnCommit: false }).pruneOnCommit).toBe(false)
+    expect(normalizeSettings({ pruneOnCommit: 'true' }).pruneOnCommit).toBe(false)
+    expect(normalizeSettings({}).pruneOnCommit).toBe(false)
+    expect(normalizeSettings(null).pruneOnCommit).toBe(false)
+  })
+
   it('null / undefined は安全な既定(codeColumn=ID, targetTable=items)になる', () => {
     const s = normalizeSettings(null)
     expect(s.codeColumn).toBe(DEFAULT_SYNC_SETTINGS.codeColumn)
@@ -286,8 +295,12 @@ describe('settingsFromDb / settingsToDb(DB 行 ↔ SyncSettings)', () => {
   })
 
   it('行フィルタ設定も DB 行 ↔ SyncSettings の往復で保たれる', () => {
-    const s = { ...base, filterColumn: '有効', filterValues: ['承認', '仮承認'] }
+    const s = { ...base, filterColumn: '有効', filterValues: ['承認', '仮承認'], pruneOnCommit: true }
     expect(settingsFromDb(settingsToDb(s))).toEqual(s)
+  })
+
+  it('prune_on_commit が無い古い DB 行は false(削除しない既定)', () => {
+    expect(settingsFromDb({ spreadsheet_id: '1Abc-def_1234567890', target_table: 'items' }).pruneOnCommit).toBe(false)
   })
 })
 

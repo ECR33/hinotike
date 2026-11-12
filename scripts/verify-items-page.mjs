@@ -7,6 +7,8 @@
  *   - 条件をリセット: 入力・年・組が一度に消え、無条件の総件数に戻る(条件なし時はボタン無効)
  *   - 入力の消去ボタン(clearable 相当): 値があるときだけ出て、押すと空になる
  *   - /scan の手入力欄が撤去されている( placeholder が存在しない)
+ *   - 絞り込み状態の保持: 行タップで結果を開いて一覧に戻ると、条件・読み込み済みの行・
+ *     スクロール位置がそのまま復活する(「一覧に戻る」とブラウザの戻るの両方)
  *   - bottom navigation とコンテンツの重なり(一覧は長いリストなので確認する)
  * 使い方: node scripts/verify-items-page.mjs [baseUrl] [email:password]
  *   既定 baseUrl=http://127.0.0.1:3000 / 既定ユーザ dev@example.com:dev-password-2026
@@ -481,6 +483,67 @@ await page.waitForFunction(() => location.pathname === '/items', { timeout: 5000
 const backRows = await rowCount()
 out.push(`一覧に戻る → ${page.url()} 行=${backRows}(0より大きい=${backRows > 0})`)
 if (backRows <= 0) ok = false
+
+// 絞り込み状態の保持(一覧 → 結果 → 一覧)。条件・読み込み済みの行・スクロール位置が復活する。
+// 1件だけの code 検索ではなく複数件の絞り込みで、位置连同を確かめる。
+const group3Again = await chipCount('3組')
+await page.getByPlaceholder('コードの一部を入力').fill('')
+await page.waitForTimeout(400)
+await toggleChip('3組')
+await waitTotal(group3Again)
+await page.evaluate(() => window.scrollTo(0, 1200))
+await page.waitForTimeout(200)
+const scrollBefore = await page.evaluate(() => window.scrollY)
+// 画面内に見える行を選ぶ(click がスクロールして位置を動かさない)
+const visibleIndex = await page.evaluate(() => {
+  const rows = [...document.querySelectorAll('.item-row')]
+  return rows.findIndex((el) => {
+    const r = el.getBoundingClientRect()
+    return r.top > 100 && r.bottom < window.innerHeight - 60
+  })
+})
+const visibleCode = (await rowCodes())[visibleIndex]
+out.push(`保持テスト: 3組で ${await statusTotal()}件 /スクロール=${scrollBefore}px / 開く行=${visibleCode}(idx=${visibleIndex})`)
+if (visibleIndex < 0) ok = false
+
+listRequests.length = 0
+await page.locator('.item-row').nth(visibleIndex).locator('a').click()
+await page.waitForFunction(() => location.pathname === '/result', { timeout: 5000 })
+const openedCode = await page.textContent('.result-card')
+out.push(`結果画面に開いた行=${openedCode?.includes(`コード ${visibleCode}`)}(true が期待値)`)
+if (!openedCode?.includes(`コード ${visibleCode}`)) ok = false
+
+await page.getByRole('link', { name: '一覧に戻る' }).click()
+await page.waitForFunction(() => location.pathname === '/items', { timeout: 5000 })
+await page.waitForTimeout(300)
+const backActiveChips = await activeChipTexts()
+const backMeta = await rowMeta()
+const backTotal = await statusTotal()
+const backScroll = await page.evaluate(() => window.scrollY)
+const keepOk =
+  backActiveChips.length === 1 &&
+  backTotal === group3Again &&
+  backMeta.length > 0 &&
+  backMeta.every((m) => m[1] === '3組') &&
+  Math.abs(backScroll - scrollBefore) <= 4 &&
+  listRequests.length === 0
+out.push(
+  `結果から「一覧に戻る」 → active=${backActiveChips.join(',')} / total=${backTotal}(=${group3Again}) / 全行の組が3組=${backMeta.every((m) => m[1] === '3組')} / スクロール=${backScroll}(去る時 ${scrollBefore}) / items-list の再fetch=${listRequests.length}(0 が期待値)`,
+)
+if (!keepOk) ok = false
+
+// ブラウザの戻るでも同じ状態が復活する(scrollToTop:false なので top スクロールしない)
+await page.locator('.item-row').nth(visibleIndex).locator('a').click()
+await page.waitForFunction(() => location.pathname === '/result', { timeout: 5000 })
+await page.goBack()
+await page.waitForFunction(() => location.pathname === '/items', { timeout: 5000 })
+await page.waitForTimeout(300)
+const backAgainChips = await activeChipTexts()
+const backAgainScroll = await page.evaluate(() => window.scrollY)
+out.push(
+  `ブラウザの戻る → active=${backAgainChips.join(',')} / total=${await statusTotal()}(=${group3Again}) / スクロール=${backAgainScroll}(去る時 ${scrollBefore})`,
+)
+if (backAgainChips.length !== 1 || (await statusTotal()) !== group3Again || Math.abs(backAgainScroll - scrollBefore) > 4) ok = false
 
 out.push(`console warnings: ${warns.slice(0, 3).join(' | ') || '(none)'}`)
 console.log(out.join('\n'))

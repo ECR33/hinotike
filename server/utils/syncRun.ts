@@ -28,7 +28,7 @@ export async function loadSyncSettings(event: H3Event): Promise<LoadedSettings> 
   const supabase = await serverSupabaseClient(event)
   const { data, error } = await supabase
     .from('sync_settings')
-    .select('spreadsheet_id, worksheet, code_column, include_columns, exclude_columns, filter_column, filter_values, rename, target_table, updated_by, updated_at')
+    .select('spreadsheet_id, worksheet, code_column, include_columns, exclude_columns, filter_column, filter_values, prune_on_commit, rename, target_table, updated_by, updated_at')
     .eq('id', 1)
     .maybeSingle()
 
@@ -105,6 +105,42 @@ export async function upsertRows(
       throw createError({ statusCode: 500, statusMessage: `upsert 失敗 (${targetTable}): ${error.message}` })
     }
   }
+}
+
+/**
+ * 対象テーブルの全 code の集合(prune の「シートに無い code」判定用)。
+ * PostgREST の既定上限(1000行)に引っ掛からない range ページングで読む。
+ */
+export async function allCodes(event: H3Event, targetTable: string): Promise<Set<string>> {
+  const supabase = await serverSupabaseClient(event)
+  const found = new Set<string>()
+  const PAGE = 1000
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase.from(targetTable).select('code').range(from, from + PAGE - 1)
+    if (error) {
+      throw createError({ statusCode: 500, statusMessage: `items code の全件照会失敗 (${targetTable}): ${error.message}` })
+    }
+    const rows = data ?? []
+    for (const row of rows) {
+      if (typeof (row as { code?: string }).code === 'string') found.add((row as { code: string }).code)
+    }
+    if (rows.length < PAGE) break
+  }
+  return found
+}
+
+/** code を chunk して delete().in() で削除し、実際に消えた行数を返す(RLS: items_delete_registered)。 */
+export async function deleteCodes(event: H3Event, targetTable: string, codes: string[]): Promise<number> {
+  const supabase = await serverSupabaseClient(event)
+  let deleted = 0
+  for (const part of chunk(codes, 100)) {
+    const { data, error } = await supabase.from(targetTable).delete().in('code', part).select('code')
+    if (error) {
+      throw createError({ statusCode: 500, statusMessage: `delete 失敗 (${targetTable}): ${error.message}` })
+    }
+    deleted += (data ?? []).length
+  }
+  return deleted
 }
 
 /** プレビューに出す payload キー名(rename 適用後の集合)。 */

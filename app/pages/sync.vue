@@ -31,6 +31,7 @@ const includeColumns = ref((configState.value?.settings.includeColumns ?? []).jo
 const excludeColumns = ref((configState.value?.settings.excludeColumns ?? []).join('\n'))
 const filterColumn = ref(configState.value?.settings.filterColumn ?? '')
 const filterValues = ref((configState.value?.settings.filterValues ?? []).join('\n'))
+const pruneOnCommit = ref(configState.value?.settings.pruneOnCommit ?? false)
 const renameText = ref(
   Object.entries(configState.value?.settings.rename ?? {})
     .map(([from, to]) => `${from} -> ${to}`)
@@ -71,6 +72,7 @@ function formPayload() {
     excludeColumns: parseList(excludeColumns.value),
     filterColumn: filterColumn.value.trim(),
     filterValues: parseList(filterValues.value),
+    pruneOnCommit: pruneOnCommit.value,
     rename: parseRename(renameText.value),
     targetTable: targetTable.value.trim(),
   }
@@ -115,6 +117,7 @@ async function saveConfig() {
     excludeColumns.value = res.settings.excludeColumns.join('\n')
     filterColumn.value = res.settings.filterColumn ?? ''
     filterValues.value = res.settings.filterValues.join('\n')
+    pruneOnCommit.value = res.settings.pruneOnCommit
     renameText.value = Object.entries(res.settings.rename).map(([f, t]) => `${f} -> ${t}`).join('\n')
     targetTable.value = res.settings.targetTable
   } catch (e) {
@@ -207,6 +210,11 @@ function sampleEntries(row: { payload: Record<string, string> }): string {
       <label class="label" for="filterValues">有効な値(複数可。改行/カンマ区切り。空 = 値が非空なら有効)</label>
       <textarea id="filterValues" class="field" rows="3" v-model="filterValues"></textarea>
 
+      <label class="label checkbox">
+        <input id="pruneOnCommit" type="checkbox" v-model="pruneOnCommit" />
+        確定時に削除も行う(今回のシートに無い code の items 行を削除。プレビューに件数を表示)
+      </label>
+
       <label class="label" for="rename">キー名の変更(1行 1ペア: <span class="mono">元 -&gt; 新</span>)</label>
       <textarea id="rename" class="field" rows="3" v-model="renameText"></textarea>
 
@@ -246,6 +254,9 @@ function sampleEntries(row: { payload: Record<string, string> }): string {
       <h2>プレビュー結果</h2>
       <p class="muted">シート: {{ preview.sheetTitle }} / データ {{ preview.dataRows }}行(code 空スキップ {{ preview.skipped }} / 行フィルタ除外 {{ preview.filtered }})</p>
       <p class="muted">新規 {{ preview.insertCount }}件 / 既存更新 {{ preview.updateCount }}件</p>
+      <p v-if="preview.pruneEnabled" class="error">
+        prune 有効: 削除予定 {{ preview.deleteCount }}件(今回のシートに無い code。確定時に削除されます)
+      </p>
       <p class="muted">ヘッダー {{ preview.headerCount }} columns: {{ preview.headers.join(', ') }}</p>
       <p class="muted">取り込み対象: {{ preview.columns.join(', ') }}</p>
       <p class="muted">payload のキー: {{ preview.payloadKeys.join(', ') }}</p>
@@ -264,7 +275,7 @@ function sampleEntries(row: { payload: Record<string, string> }): string {
       <h2>取り込み完了</h2>
       <p class="muted">
         {{ committed.sheetTitle }} → {{ committed.targetTable }}: {{ committed.upserted }}件
-        (新規 {{ committed.insertCount }} / 更新 {{ committed.updateCount }} / スキップ {{ committed.skipped }} / 行フィルタ除外 {{ committed.filtered }})
+        (新規 {{ committed.insertCount }} / 更新 {{ committed.updateCount }} / スキップ {{ committed.skipped }} / 行フィルタ除外 {{ committed.filtered }} / 削除 {{ committed.deleted }})
       </p>
     </div>
   </div>
@@ -276,6 +287,12 @@ function sampleEntries(row: { payload: Record<string, string> }): string {
   color: var(--muted);
   font-size: 13px;
   margin: 12px 0 6px;
+}
+
+.label.checkbox {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .mono {

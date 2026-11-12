@@ -25,6 +25,8 @@ export interface SyncSettings {
   filterColumn: string | null
   /** filterColumn の許容値(複数可)。空リスト = そのカラムの値が非空なら有効 */
   filterValues: string[]
+  /** true = 確定時に、今回のシートで取り込み対象だった code に無い items 行を削除する(prune) */
+  pruneOnCommit: boolean
   /** payload のキー名を書き換える: { "元カラム名": "新キー名" } */
   rename: Record<string, string>
   /** 書き込み先のテーブル名 */
@@ -57,6 +59,7 @@ export const DEFAULT_SYNC_SETTINGS: SyncSettings = {
   excludeColumns: [],
   filterColumn: null,
   filterValues: [],
+  pruneOnCommit: false,
   rename: { '領収書が必要な方はチェックをお願いします。': '領収書' },
   targetTable: 'items',
 }
@@ -105,6 +108,7 @@ export function normalizeSettings(raw: Partial<SyncSettings> | null | undefined)
     filterValues: Array.isArray(raw?.filterValues)
       ? raw!.filterValues!.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim())
       : [],
+    pruneOnCommit: raw?.pruneOnCommit === true,
     rename:
       raw?.rename && typeof raw.rename === 'object' && !Array.isArray(raw.rename)
         ? Object.fromEntries(
@@ -128,6 +132,7 @@ export function settingsFromDb(row: Record<string, unknown> | null | undefined):
     excludeColumns: Array.isArray(row.exclude_columns) ? (row.exclude_columns as string[]) : [],
     filterColumn: typeof row.filter_column === 'string' && row.filter_column.trim() ? row.filter_column : null,
     filterValues: Array.isArray(row.filter_values) ? (row.filter_values as string[]) : [],
+    pruneOnCommit: row.prune_on_commit === true,
     rename: (row.rename ?? {}) as Record<string, string>,
     targetTable: typeof row.target_table === 'string' ? row.target_table : undefined,
   })
@@ -144,6 +149,7 @@ export function settingsToDb(s: SyncSettings): Record<string, unknown> {
     exclude_columns: s.excludeColumns,
     filter_column: s.filterColumn,
     filter_values: s.filterValues,
+    prune_on_commit: s.pruneOnCommit,
     rename: s.rename,
     target_table: s.targetTable,
   }
@@ -303,6 +309,10 @@ export interface SyncPreviewResponse {
   skipped: number
   /** 行フィルタ(filterColumn/filterValues)で除外した行数 */
   filtered: number
+  /** prune(削除)が設定で有効か */
+  pruneEnabled: boolean
+  /** 確定時に削除される予定の items 行数(シートに無い code。pruneEnabled のときのみ計算) */
+  deleteCount: number
   /** 既に code が存在する行数(update 対象) */
   updateCount: number
   /** 新規 code の行数(insert 対象) */
@@ -323,4 +333,6 @@ export interface SyncCommitResponse {
   skipped: number
   /** 行フィルタ(filterColumn/filterValues)で除外した行数 */
   filtered: number
+  /** prune(設定有効時)で実際に削除した items 行数 */
+  deleted: number
 }
