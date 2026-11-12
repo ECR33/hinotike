@@ -91,7 +91,7 @@ async function main() {
   const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
   const { data: row, error: rowError } = await supabase
     .from('sync_settings')
-    .select('spreadsheet_id, worksheet, code_column, include_columns, exclude_columns, rename, target_table')
+    .select('spreadsheet_id, worksheet, code_column, include_columns, exclude_columns, filter_column, filter_values, rename, target_table')
     .eq('id', 1)
     .maybeSingle()
   if (rowError) {
@@ -140,8 +140,16 @@ async function main() {
     console.error(`code カラム "${settings.codeColumn}" がヘッダーにありません。sync_settings の code_column を修正してください`)
     process.exit(1)
   }
+  if (mapped.filterColumnMissing) {
+    console.error(`行フィルタのカラム "${settings.filterColumn}" がヘッダーにありません。sync_settings の filter_column を修正してください`)
+    process.exit(1)
+  }
   console.log(`取り込み対象カラム: ${mapped.columns.join(', ')}`)
-  console.log(`upsert: ${mapped.rows.length}件(code 空スキップ ${mapped.skipped}件)`)
+  if (settings.filterColumn) {
+    const allowed = settings.filterValues.length > 0 ? settings.filterValues.join(', ') : '(値が非空なら有効)'
+    console.log(`行フィルタ: "${settings.filterColumn}" の値が有効 (${allowed})`)
+  }
+  console.log(`upsert: ${mapped.rows.length}件(code 空スキップ ${mapped.skipped}件 / 行フィルタ除外 ${mapped.filtered}件)`)
 
   // 既存 code を照会して内訳を報告する(upsert の挙動は idempotent)。
   const codes = mapped.rows.map((r) => r.code)

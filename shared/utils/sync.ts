@@ -18,6 +18,13 @@ export interface SyncSettings {
   includeColumns: string[]
   /** includeColumns が空のときに除外するカラム名 */
   excludeColumns: string[]
+  /**
+   * 行の有効/無効を表すカラム名。null/空 = 行フィルタなし(全行读取込み対象)。
+   * 指定すると、このカラムの値が filterValues に合う行のみ取り込む(値の比較は trim 後の完全一致)。
+   */
+  filterColumn: string | null
+  /** filterColumn の許容値(複数可)。空リスト = そのカラムの値が非空なら有効 */
+  filterValues: string[]
   /** payload のキー名を書き換える: { "元カラム名": "新キー名" } */
   rename: Record<string, string>
   /** 書き込み先のテーブル名 */
@@ -48,6 +55,8 @@ export const DEFAULT_SYNC_SETTINGS: SyncSettings = {
     '備考',
   ],
   excludeColumns: [],
+  filterColumn: null,
+  filterValues: [],
   rename: { '領収書が必要な方はチェックをお願いします。': '領収書' },
   targetTable: 'items',
 }
@@ -89,6 +98,13 @@ export function normalizeSettings(raw: Partial<SyncSettings> | null | undefined)
     excludeColumns: Array.isArray(raw?.excludeColumns)
       ? raw!.excludeColumns!.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim())
       : [],
+    filterColumn:
+      typeof raw?.filterColumn === 'string' && raw.filterColumn.trim()
+        ? raw.filterColumn.trim()
+        : null,
+    filterValues: Array.isArray(raw?.filterValues)
+      ? raw!.filterValues!.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim())
+      : [],
     rename:
       raw?.rename && typeof raw.rename === 'object' && !Array.isArray(raw.rename)
         ? Object.fromEntries(
@@ -110,6 +126,8 @@ export function settingsFromDb(row: Record<string, unknown> | null | undefined):
     codeColumn: typeof row.code_column === 'string' ? row.code_column : undefined,
     includeColumns: Array.isArray(row.include_columns) ? (row.include_columns as string[]) : [],
     excludeColumns: Array.isArray(row.exclude_columns) ? (row.exclude_columns as string[]) : [],
+    filterColumn: typeof row.filter_column === 'string' && row.filter_column.trim() ? row.filter_column : null,
+    filterValues: Array.isArray(row.filter_values) ? (row.filter_values as string[]) : [],
     rename: (row.rename ?? {}) as Record<string, string>,
     targetTable: typeof row.target_table === 'string' ? row.target_table : undefined,
   })
@@ -124,6 +142,8 @@ export function settingsToDb(s: SyncSettings): Record<string, unknown> {
     code_column: s.codeColumn,
     include_columns: s.includeColumns,
     exclude_columns: s.excludeColumns,
+    filter_column: s.filterColumn,
+    filter_values: s.filterValues,
     rename: s.rename,
     target_table: s.targetTable,
   }
@@ -164,14 +184,21 @@ export interface SheetMapping {
   rows: SyncRow[]
   /** code が空だった行の数 */
   skipped: number
+  /** filterColumn の行フィルタで除外した行数(code 空スキップとは別カウント) */
+  filtered: number
   /** codeColumn がヘッダーに無い(設定ミス。取り込み不可) */
   codeColumnMissing: boolean
   codeColumn: string
+  /** filterColumn がヘッダーに無い(設定ミス。取り込み不可) */
+  filterColumnMissing: boolean
+  filterColumn: string | null
 }
 
 /**
  * シートの値(1行目=ヘッダー)を { code, payload } へ変換する。
  * - code が空の行はスキップ
+ * - filterColumn 設定時は、そのカラムの値(trim)が filterValues のいずれかと一致する行のみ取り込む。
+ *   filterValues が空リストなら「値が非空なら有効」(有効レコードの印字なら何でも通す)
  * - 空値(undefined/'')は payload に載せない
  * - rename のキー変換を適用
  */
@@ -182,16 +209,38 @@ export function mapSheetRows(values: unknown[][], settings: SyncSettings): Sheet
   const codeIdx = headers.indexOf(settings.codeColumn)
 
   if (codeIdx === -1) {
-    return { headers, columns, rows: [], skipped: 0, codeColumnMissing: true, codeColumn: settings.codeColumn }
+    return {
+      headers, columns, rows: [], skipped: 0, filtered: 0,
+      codeColumnMissing: true, codeColumn: settings.codeColumn,
+      filterColumnMissing: false, filterColumn: settings.filterColumn,
+    }
+  }
+
+  const filterIdx = settings.filterColumn ? headers.indexOf(settings.filterColumn) : -1
+  if (settings.filterColumn && filterIdx === -1) {
+    return {
+      headers, columns, rows: [], skipped: 0, filtered: 0,
+      codeColumnMissing: false, codeColumn: settings.codeColumn,
+      filterColumnMissing: true, filterColumn: settings.filterColumn,
+    }
   }
 
   const rows: SyncRow[] = []
   let skipped = 0
+  let filtered = 0
   for (const row of values.slice(1)) {
     const code = String(row?.[codeIdx] ?? '').trim()
     if (!code) {
       skipped += 1
       continue
+    }
+    if (settings.filterColumn && filterIdx !== -1) {
+      const flag = String(row?.[filterIdx] ?? '').trim()
+      const valid = settings.filterValues.length > 0 ? settings.filterValues.includes(flag) : flag !== ''
+      if (!valid) {
+        filtered += 1
+        continue
+      }
     }
     const payload: Record<string, string> = {}
     for (const col of columns) {
@@ -205,7 +254,11 @@ export function mapSheetRows(values: unknown[][], settings: SyncSettings): Sheet
     rows.push({ code, payload })
   }
 
-  return { headers, columns, rows, skipped, codeColumnMissing: false, codeColumn: settings.codeColumn }
+  return {
+    headers, columns, rows, skipped, filtered,
+    codeColumnMissing: false, codeColumn: settings.codeColumn,
+    filterColumnMissing: false, filterColumn: settings.filterColumn,
+  }
 }
 
 /** upsert のバッチサイズ(CLI・API 共通)。 */
@@ -248,6 +301,8 @@ export interface SyncPreviewResponse {
   dataRows: number
   /** code が空でスキップされた行数 */
   skipped: number
+  /** 行フィルタ(filterColumn/filterValues)で除外した行数 */
+  filtered: number
   /** 既に code が存在する行数(update 対象) */
   updateCount: number
   /** 新規 code の行数(insert 対象) */
@@ -266,4 +321,6 @@ export interface SyncCommitResponse {
   insertCount: number
   updateCount: number
   skipped: number
+  /** 行フィルタ(filterColumn/filterValues)で除外した行数 */
+  filtered: number
 }

@@ -120,7 +120,7 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
    - 開発ホスト許可は `DEV_ALLOWED_HOSTS` / `NUXT_VITE_ALLOWED_HOST`(nuxt.config にホストをハードコードしない)
    - アプリサーバーは Secret key を使わない(items の insert/update は RLS の `is_registered_user()` で許可する。Secret key は CLI の同期だけ)
 3. Supabase 側:
-   - `supabase/migrations/0001_init.sql` → `supabase/migrations/0002_registration_requests.sql` → `supabase/migrations/0003_sync_settings.sql` を SQL Editor でこの順に実行(users / items / ドメイン表 / RLS / 関数 + 許可依頼の依頼テーブルと RPC + 同期設定テーブル `sync_settings` とシード行。関数が RLS ポリシーより先に作成される順になっている)
+   - `supabase/migrations/0001_init.sql` → `supabase/migrations/0002_registration_requests.sql` → `supabase/migrations/0003_sync_settings.sql` → `supabase/migrations/0004_sync_row_filter.sql` を SQL Editor でこの順に実行(users / items / ドメイン表 / RLS / 関数 + 許可依頼の依頼テーブルと RPC + 同期設定テーブル `sync_settings` とシード行 + 行フィルタ列(filter_column / filter_values)。関数が RLS ポリシーより先に作成される順になっている)
      - 旧スキーマからの移行は drop して再作成(items は再同期で復元)
    - Authentication → Third-party providers → Google を有効化
    - Authentication → URL Configuration:
@@ -135,7 +135,7 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
      **少なくとも1人**は必ずこの経路で登録しておく(QRによる許可運用には許可済みの利用者が必要)
 4. スプレッドシート同期(UI から発動 / `/sync`):
    - 取り込み設定は DB の `public.sync_settings`(singleton 行 id=1)が正。`/sync` 画面でスプレッドシート ID・
-     ワークシート・code カラム・取り込みカラム(空 = 全カラム)・除外・rename・対象テーブルを編集し、
+     ワークシート・code カラム・取り込みカラム(空 = 全カラム)・除外・行フィルタ(有効レコードを表すカラム名 + 許容値のリスト。リスト空 = そのカラムの値が非空なら有効。カラム名空 = フィルタなし)・rename・対象テーブルを編集し、
      「設定を保存」→「プレビュー」→「取り込みを確定」の順で実行する(確定は `confirm: true` 必須、5000行超は拒否)
    - シート読み取りは Worker 側で行う(googleapis 不使用): サービスアカウント鍵から JWT(RS256)を自前署名し
      oauth2 の jwt-bearer grant で access token を取り、Sheets REST API(v4)を fetch で読む

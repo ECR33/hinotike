@@ -53,6 +53,13 @@ export default defineEventHandler(async (event): Promise<SyncCommitResponse> => 
       data: { codeColumn: settings.codeColumn, headers: mapped.headers },
     })
   }
+  if (mapped.filterColumnMissing) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: `行フィルタのカラム "${settings.filterColumn}" がヘッダーにありません`,
+      data: { codeColumn: settings.filterColumn, headers: mapped.headers },
+    })
+  }
 
   // upsert 前に既存 code を照会して insert/update の内訳を報告する(upsert の挙動自体は idempotent)。
   const codes = mapped.rows.map((r) => r.code)
@@ -68,5 +75,6 @@ export default defineEventHandler(async (event): Promise<SyncCommitResponse> => 
     insertCount: mapped.rows.length - updateCount,
     updateCount,
     skipped: mapped.skipped,
+    filtered: mapped.filtered,
   }
 })

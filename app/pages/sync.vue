@@ -29,6 +29,8 @@ const worksheet = ref(configState.value?.settings.worksheet ?? '')
 const codeColumn = ref(configState.value?.settings.codeColumn ?? 'ID')
 const includeColumns = ref((configState.value?.settings.includeColumns ?? []).join('\n'))
 const excludeColumns = ref((configState.value?.settings.excludeColumns ?? []).join('\n'))
+const filterColumn = ref(configState.value?.settings.filterColumn ?? '')
+const filterValues = ref((configState.value?.settings.filterValues ?? []).join('\n'))
 const renameText = ref(
   Object.entries(configState.value?.settings.rename ?? {})
     .map(([from, to]) => `${from} -> ${to}`)
@@ -67,6 +69,8 @@ function formPayload() {
     codeColumn: codeColumn.value.trim(),
     includeColumns: parseList(includeColumns.value),
     excludeColumns: parseList(excludeColumns.value),
+    filterColumn: filterColumn.value.trim(),
+    filterValues: parseList(filterValues.value),
     rename: parseRename(renameText.value),
     targetTable: targetTable.value.trim(),
   }
@@ -109,6 +113,8 @@ async function saveConfig() {
     codeColumn.value = res.settings.codeColumn
     includeColumns.value = res.settings.includeColumns.join('\n')
     excludeColumns.value = res.settings.excludeColumns.join('\n')
+    filterColumn.value = res.settings.filterColumn ?? ''
+    filterValues.value = res.settings.filterValues.join('\n')
     renameText.value = Object.entries(res.settings.rename).map(([f, t]) => `${f} -> ${t}`).join('\n')
     targetTable.value = res.settings.targetTable
   } catch (e) {
@@ -195,6 +201,12 @@ function sampleEntries(row: { payload: Record<string, string> }): string {
       <label class="label" for="excludeColumns">除外カラム(取り込みカラムが空のとき有効)</label>
       <textarea id="excludeColumns" class="field" rows="3" v-model="excludeColumns"></textarea>
 
+      <label class="label" for="filterColumn">行フィルタのカラム(有効レコードを表す列。空 = フィルタなし)</label>
+      <input id="filterColumn" class="field" v-model="filterColumn" placeholder="例: 有効 / 入金状況" />
+
+      <label class="label" for="filterValues">有効な値(複数可。改行/カンマ区切り。空 = 値が非空なら有効)</label>
+      <textarea id="filterValues" class="field" rows="3" v-model="filterValues"></textarea>
+
       <label class="label" for="rename">キー名の変更(1行 1ペア: <span class="mono">元 -&gt; 新</span>)</label>
       <textarea id="rename" class="field" rows="3" v-model="renameText"></textarea>
 
@@ -213,6 +225,7 @@ function sampleEntries(row: { payload: Record<string, string> }): string {
       <p class="muted">
         プレビュー(読み取りのみ・書き込みなし)→ 確認 → 確定(upsert)の順で実行します。
         code が空の行はスキップし、既存の code は payload を上書きします(imported_at を更新)。
+        行フィルタを設定すると、そのカラムの値が「有効な値」のいずれかだった行だけ取り込みます。
       </p>
       <button class="btn secondary" type="button" :disabled="previewing || !spreadsheetId" @click="runPreview">
         {{ previewing ? '読み込み中…' : 'プレビュー' }}
@@ -231,7 +244,7 @@ function sampleEntries(row: { payload: Record<string, string> }): string {
 
     <div v-if="preview" class="card">
       <h2>プレビュー結果</h2>
-      <p class="muted">シート: {{ preview.sheetTitle }} / データ {{ preview.dataRows }}行(code 空スキップ {{ preview.skipped }})</p>
+      <p class="muted">シート: {{ preview.sheetTitle }} / データ {{ preview.dataRows }}行(code 空スキップ {{ preview.skipped }} / 行フィルタ除外 {{ preview.filtered }})</p>
       <p class="muted">新規 {{ preview.insertCount }}件 / 既存更新 {{ preview.updateCount }}件</p>
       <p class="muted">ヘッダー {{ preview.headerCount }} columns: {{ preview.headers.join(', ') }}</p>
       <p class="muted">取り込み対象: {{ preview.columns.join(', ') }}</p>
@@ -251,7 +264,7 @@ function sampleEntries(row: { payload: Record<string, string> }): string {
       <h2>取り込み完了</h2>
       <p class="muted">
         {{ committed.sheetTitle }} → {{ committed.targetTable }}: {{ committed.upserted }}件
-        (新規 {{ committed.insertCount }} / 更新 {{ committed.updateCount }} / スキップ {{ committed.skipped }})
+        (新規 {{ committed.insertCount }} / 更新 {{ committed.updateCount }} / スキップ {{ committed.skipped }} / 行フィルタ除外 {{ committed.filtered }})
       </p>
     </div>
   </div>

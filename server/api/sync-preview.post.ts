@@ -43,6 +43,13 @@ export default defineEventHandler(async (event): Promise<SyncPreviewResponse> =>
       data: { codeColumn: settings.codeColumn, headers: mapped.headers },
     })
   }
+  if (mapped.filterColumnMissing) {
+    throw createError({
+      statusCode: 400,
+      statusMessage: `行フィルタのカラム "${settings.filterColumn}" がヘッダーにありません`,
+      data: { codeColumn: settings.filterColumn, headers: mapped.headers },
+    })
+  }
 
   const codes = mapped.rows.map((r) => r.code)
   const existing = await existingCodes(event, settings.targetTable, codes)
@@ -60,6 +67,7 @@ export default defineEventHandler(async (event): Promise<SyncPreviewResponse> =>
     payloadKeys: payloadKeysOf(mapped.rows),
     dataRows: dataRowCount,
     skipped: mapped.skipped,
+    filtered: mapped.filtered,
     updateCount,
     insertCount,
     sample: mapped.rows.slice(0, 10),

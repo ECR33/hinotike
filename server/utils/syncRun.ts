@@ -28,7 +28,7 @@ export async function loadSyncSettings(event: H3Event): Promise<LoadedSettings> 
   const supabase = await serverSupabaseClient(event)
   const { data, error } = await supabase
     .from('sync_settings')
-    .select('spreadsheet_id, worksheet, code_column, include_columns, exclude_columns, rename, target_table, updated_by, updated_at')
+    .select('spreadsheet_id, worksheet, code_column, include_columns, exclude_columns, filter_column, filter_values, rename, target_table, updated_by, updated_at')
     .eq('id', 1)
     .maybeSingle()
 

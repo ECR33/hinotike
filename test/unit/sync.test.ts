@@ -19,6 +19,8 @@ const base: SyncSettings = {
   codeColumn: 'ID',
   includeColumns: ['ID', '学年', 'クラス', '氏名'],
   excludeColumns: [],
+  filterColumn: null,
+  filterValues: [],
   rename: { '領収書が必要な方はチェックをお願いします。': '領収書' },
   targetTable: 'items',
 }
@@ -104,6 +106,59 @@ describe('mapSheetRows(シート値 → code + payload)', () => {
   })
 })
 
+describe('mapSheetRows(行フィルタ filterColumn / filterValues)', () => {
+  const values = [
+    ['ID', '氏名', '有効'],
+    ['1001', 'ひの 太郎', '承認'],
+    ['1002', 'さかもと 花子', '仮承認'],
+    ['1003', 'あかの 助', '却下'],
+    ['1004', 'うかの 郎', ''],
+    ['', 'code 空', '承認'],
+  ]
+
+  it('filterColumn 未設定なら全行取り込み(filtered=0)', () => {
+    const mapped = mapSheetRows(values, { ...base, includeColumns: [] })
+    expect(mapped.rows.map((r) => r.code)).toEqual(['1001', '1002', '1003', '1004'])
+    expect(mapped.filtered).toBe(0)
+    expect(mapped.skipped).toBe(1)
+  })
+
+  it('filterValues のいずれかに一致する行のみ取り込む(複数値)', () => {
+    const mapped = mapSheetRows(values, { ...base, includeColumns: [], filterColumn: '有効', filterValues: ['承認', '仮承認'] })
+    expect(mapped.rows.map((r) => r.code)).toEqual(['1001', '1002'])
+    expect(mapped.filtered).toBe(2)
+    expect(mapped.skipped).toBe(1)
+  })
+
+  it('セル値は trim して比較。数値も文字列化して照合する', () => {
+    const mapped = mapSheetRows(
+      [['ID', '有効'], ['1001', ' 承認 ', ], ['1002', 2]],
+      { ...base, includeColumns: [], filterColumn: '有効', filterValues: ['承認', '2'] },
+    )
+    expect(mapped.rows.map((r) => r.code)).toEqual(['1001', '1002'])
+    expect(mapped.filtered).toBe(0)
+  })
+
+  it('filterValues が空リストなら「値が非空なら有効」', () => {
+    const mapped = mapSheetRows(values, { ...base, includeColumns: [], filterColumn: '有効', filterValues: [] })
+    expect(mapped.rows.map((r) => r.code)).toEqual(['1001', '1002', '1003'])
+    expect(mapped.filtered).toBe(1)
+  })
+
+  it('code 空の行はフィルタより先に skipped として扱われる', () => {
+    const mapped = mapSheetRows(values, { ...base, includeColumns: [], filterColumn: '有効', filterValues: ['承認'] })
+    expect(mapped.skipped).toBe(1)
+    expect(mapped.filtered).toBe(3)
+  })
+
+  it('filterColumn がヘッダーに無いと filterColumnMissing=true(取り込み不可)', () => {
+    const mapped = mapSheetRows(values, { ...base, includeColumns: [], filterColumn: '存在しない列', filterValues: ['承認'] })
+    expect(mapped.filterColumnMissing).toBe(true)
+    expect(mapped.codeColumnMissing).toBe(false)
+    expect(mapped.rows).toEqual([])
+  })
+})
+
 describe('sheetTitleFor(対象ワークシート選択)', () => {
   it('設定名と一致するタイトルを選ぶ', () => {
     expect(sheetTitleFor(['Sheet1', 'フォームの回答 1'], 'フォームの回答 1')).toBe('フォームの回答 1')
@@ -152,6 +207,14 @@ describe('normalizeSettings(UI 入力の正規化)', () => {
     expect(normalizeSettings({ codeColumn: ' 注文番号 ' }).codeColumn).toBe('注文番号')
   })
 
+  it('filterColumn の空/空白は null(フィルタなし)、filterValues の空白項目は除く', () => {
+    expect(normalizeSettings({ filterColumn: '' }).filterColumn).toBe(null)
+    expect(normalizeSettings({ filterColumn: '  有効 ' }).filterColumn).toBe('有効')
+    expect(normalizeSettings({ filterColumn: null }).filterColumn).toBe(null)
+    expect(normalizeSettings({ filterValues: ['承認', ' ', '', '仮承認'] }).filterValues).toEqual(['承認', '仮承認'])
+    expect(normalizeSettings({ filterValues: 'x' }).filterValues).toEqual([])
+  })
+
   it('null / undefined は安全な既定(codeColumn=ID, targetTable=items)になる', () => {
     const s = normalizeSettings(null)
     expect(s.codeColumn).toBe(DEFAULT_SYNC_SETTINGS.codeColumn)
@@ -160,6 +223,8 @@ describe('normalizeSettings(UI 入力の正規化)', () => {
     expect(s.includeColumns).toEqual([])
     expect(s.spreadsheetId).toBe('')
     expect(s.worksheet).toBe(null)
+    expect(s.filterColumn).toBe(null)
+    expect(s.filterValues).toEqual([])
     const again = normalizeSettings(undefined)
     expect(again).toEqual(s)
   })
@@ -192,10 +257,14 @@ describe('settingsFromDb / settingsToDb(DB 行 ↔ SyncSettings)', () => {
       code_column: 'ID',
       include_columns: ['学年', 'クラス'],
       exclude_columns: [],
+      filter_column: '有効',
+      filter_values: ['承認', '仮承認'],
       rename: { a: 'b' },
       target_table: 'items',
     })
     expect(s.includeColumns).toEqual(['学年', 'クラス'])
+    expect(s.filterColumn).toBe('有効')
+    expect(s.filterValues).toEqual(['承認', '仮承認'])
     expect(s.rename).toEqual({ a: 'b' })
   })
 
@@ -214,6 +283,11 @@ describe('settingsFromDb / settingsToDb(DB 行 ↔ SyncSettings)', () => {
     const db = settingsToDb(base)
     expect(db.id).toBe(1)
     expect(settingsFromDb(db)).toEqual(base)
+  })
+
+  it('行フィルタ設定も DB 行 ↔ SyncSettings の往復で保たれる', () => {
+    const s = { ...base, filterColumn: '有効', filterValues: ['承認', '仮承認'] }
+    expect(settingsFromDb(settingsToDb(s))).toEqual(s)
   })
 })
 
