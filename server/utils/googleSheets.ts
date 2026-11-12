@@ -10,10 +10,12 @@
  * (ローカル dev の Node と Workers の workerd で使える側が異なるため)。
  */
 
-import { sheetTitleFor } from '#shared/utils/sync'
+import { a1Cell, sheetTitleFor } from '#shared/utils/sync'
 
 const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets.readonly'
+// セルの書き込み(values.update)に必要な編集スコープ(読み取りスコープでは 403 になる)
+const SHEETS_SCOPE_EDIT = 'https://www.googleapis.com/auth/spreadsheets'
 // Sheets API の host は sheets.googleapis.com(www.googleapis.com/v4 は 404 を返す)
 const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets'
 
@@ -120,16 +122,16 @@ export async function signRs256(data: string, pem: string): Promise<string> {
   return base64Url(new Uint8Array(signer.sign(pem)))
 }
 
-export async function signedJwt(sa: ServiceAccountKey, nowMs = Date.now()): Promise<string> {
+export async function signedJwt(sa: ServiceAccountKey, nowMs = Date.now(), scope = SHEETS_SCOPE): Promise<string> {
   const header = base64UrlText(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))
-  const payload = base64UrlText(JSON.stringify(jwtClaims(sa, nowMs)))
+  const payload = base64UrlText(JSON.stringify(jwtClaims(sa, nowMs, scope)))
   const signature = await signRs256(`${header}.${payload}`, sa.private_key)
   return `${header}.${payload}.${signature}`
 }
 
 /** jwt-bearer grant で access token を取得。失敗時は status と message を持つ Error。 */
-export async function sheetsAccessToken(sa: ServiceAccountKey): Promise<string> {
-  const assertion = await signedJwt(sa)
+export async function sheetsAccessToken(sa: ServiceAccountKey, scope = SHEETS_SCOPE): Promise<string> {
+  const assertion = await signedJwt(sa, Date.now(), scope)
   const res = await fetch(OAUTH_TOKEN_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -182,4 +184,33 @@ export async function fetchSpreadsheetValues(
   }
   const json = (await res.json()) as { values?: unknown[][] }
   return { title, titles, values: json.values ?? [] }
+}
+
+/**
+ * 対象シートの 1 セルを書き込む(values.update / RAW)。
+ * 編集スコープの token を都度取得する(読み取り側は readonly のまま)。
+ * rowNumber は 1起点(a1Cell と同じ基準)。value に空文字を渡すとセルが空になる。
+ */
+export async function updateCellValue(
+  spreadsheetId: string,
+  title: string,
+  sa: ServiceAccountKey,
+  colIndex: number,
+  rowNumber: number,
+  value: string,
+): Promise<void> {
+  const token = await sheetsAccessToken(sa, SHEETS_SCOPE_EDIT)
+  const range = a1Cell(title, colIndex, rowNumber)
+  const res = await fetch(
+    `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
+    {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ values: [[value]] }),
+    },
+  )
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`セルの書き込み失敗 (${res.status}): ${body.slice(0, 200)}`)
+  }
 }

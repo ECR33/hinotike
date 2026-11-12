@@ -208,9 +208,21 @@ export interface SheetMapping {
  * - 空値(undefined/'')は payload に載せない
  * - rename のキー変換を適用
  */
+/** シート1行目(ヘッダー)を正規化する。空セルは column_N にする(取り込み・セル参照で共通)。 */
+export function normalizeHeaders(rawHeader: unknown[]): string[] {
+  return rawHeader.map((h, i) => (h === undefined || h === null || h === '' ? `column_${i + 1}` : String(h)))
+}
+
+/** payload キー → シート上の元カラム名(rename を逆引き。rename 対象が無ければキー名そのまま)。 */
+export function sourceColumnFor(payloadKey: string, rename: Record<string, string>): string {
+  for (const [from, to] of Object.entries(rename)) {
+    if (to === payloadKey) return from
+  }
+  return payloadKey
+}
+
 export function mapSheetRows(values: unknown[][], settings: SyncSettings): SheetMapping {
-  const rawHeader = values[0] ?? []
-  const headers = rawHeader.map((h, i) => (h === undefined || h === null || h === '' ? `column_${i + 1}` : String(h)))
+  const headers = normalizeHeaders(values[0] ?? [])
   const columns = selectColumns(headers, settings)
   const codeIdx = headers.indexOf(settings.codeColumn)
 
@@ -321,6 +333,31 @@ export interface SyncPreviewResponse {
   sample: SyncRow[]
   /** MAX_SYNC_ROWS を超えて切り捨てられたか */
   truncated: boolean
+}
+
+/** セット番号 → A1 の列表記(0基点: 0='A', 25='Z', 26='AA')。 */
+export function columnLetter(index: number): string {
+  let n = index + 1
+  let letters = ''
+  while (n > 0) {
+    n -= 1
+    letters = String.fromCharCode(65 + (n % 26)) + letters
+    n = Math.floor(n / 26)
+  }
+  return letters
+}
+
+/**
+ * A1 のシート名パート。常にシングルクォート 1組で囲む(「フォームの回答 1」のような
+ * 空白入りタイトルを range に載せるため)。A1 規則通り、タイトル内の ' は 2個重ねてエスケープする。
+ */
+export function quoteSheetTitle(title: string): string {
+  return `'${title.replace(/'/g, "''")}'`
+}
+
+/** セル番地の A1 表記(rowNumber は 1起点。ヘッダーが 1行目なのでデータ行は index+2)。 */
+export function a1Cell(title: string, colIndex: number, rowNumber: number): string {
+  return `${quoteSheetTitle(title)}!${columnLetter(colIndex)}${rowNumber}`
 }
 
 /** /api/sync-commit の応答。 */

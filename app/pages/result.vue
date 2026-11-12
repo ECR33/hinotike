@@ -1,12 +1,20 @@
 <script setup lang="ts">
 // 保護は app/middleware/auth.global.ts(グローバル+ホワイトリスト)で行う
 
-import { ITEM_GROUP_KEY, ITEM_NAME_KEY, ITEM_YEAR_KEY, payloadValue } from '#shared/utils/items'
+import { ITEM_GROUP_KEY, ITEM_NAME_KEY, ITEM_REMARK_KEY, ITEM_YEAR_KEY, REMARK_MAX_LENGTH, payloadValue } from '#shared/utils/items'
 
 const route = useRoute()
 const code = computed(() => String(route.query.code ?? ''))
 
 type LookupResult = { found: boolean; code: string; row: Record<string, unknown> | null }
+type RemarkUpdateResponse = {
+  ok: true
+  code: string
+  remark: string
+  sheetTitle: string
+  range: string
+  dbUpdated: boolean
+}
 
 // SSR で解決した結果は useState 経由で hydration 時にクライアントへ引き継がれる(再fetch防止)。
 // SSR の内部 fetch は cookie を自動では持たないため useRequestHeaders で明示転送する。
@@ -37,7 +45,52 @@ if (code.value && !cachedForCurrentCode && !(result.value === null && errorMessa
 // クライアント遷移で code が変わった場合は再照会する
 watch(code, (c) => {
   if (result.value?.code !== c) void fetchLookup(c)
+  // code が変わったら編集状態は古い code の内容なので閉じる
+  if (result.value?.code !== c) closeRemarkEditor()
 })
+
+/** 備考欄のインライン編集(保存は /api/remark-update → シートと items payload に反映)。 */
+const editingRemark = ref(false)
+const remarkDraft = ref('')
+const remarkBusy = ref(false)
+const remarkError = useState<string | null>('remark-error', () => null)
+
+function closeRemarkEditor() {
+  editingRemark.value = false
+  remarkError.value = null
+}
+
+function startRemarkEdit() {
+  remarkDraft.value = payloadValue(payload.value, ITEM_REMARK_KEY)
+  remarkError.value = null
+  editingRemark.value = true
+}
+
+async function saveRemark() {
+  if (remarkBusy.value || !result.value?.row) return
+  remarkBusy.value = true
+  remarkError.value = null
+  try {
+    const res = await $fetch<RemarkUpdateResponse>('/api/remark-update', {
+      method: 'POST',
+      body: { code: result.value.code, remark: remarkDraft.value },
+    })
+    // 保存結果を再fetchなしで画面に反映(trim 後の値。空はキー削除 = 取り込み側の empty skip と同じ)
+    const p = { ...(result.value.row.payload ?? {}) } as Record<string, unknown>
+    if (res.remark) p[ITEM_REMARK_KEY] = res.remark
+    else delete p[ITEM_REMARK_KEY]
+    result.value = { ...result.value, row: { ...result.value.row, payload: p } }
+    editingRemark.value = false
+    // シートは更新済みだが DB 更新が失敗したケース(次の同期で一致する)を注記として残す
+    if (!res.dbUpdated) {
+      remarkError.value = 'スプレッドシートには保存済みです(DB の反映に失敗したため、次の同期で一致します)'
+    }
+  } catch (e: unknown) {
+    remarkError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    remarkBusy.value = false
+  }
+}
 
 const row = computed(() => result.value?.row ?? null)
 const payload = computed(() => {
@@ -174,6 +227,8 @@ const entries = computed<Array<[string, string]>>(() => {
   for (const key of DETAIL_TAIL) {
     if (key in p) pushDetail(pairs, taken, key, p[key])
   }
+  // 備考が空/欠落の行でも編集できるように、空の備考行を必ず出す(編集ボタンが「追加」の入口になる)
+  if (!taken.has(ITEM_REMARK_KEY)) pairs.push([ITEM_REMARK_KEY, ''])
   for (const [k, v] of Object.entries(p)) {
     if (!taken.has(k)) pushDetail(pairs, taken, k, v)
   }
@@ -279,7 +334,30 @@ function formatImportedAt(iso: string): string {
         <template v-for="[key, value] in entries" :key="key">
           <div class="result-row">
             <dt>{{ key }}</dt>
-            <dd>{{ value }}</dd>
+            <!-- 備考だけインライン編集(保存でスプレッドシートと items に反映) -->
+            <dd v-if="key === ITEM_REMARK_KEY && editingRemark" class="remark-edit">
+              <textarea
+                v-model="remarkDraft"
+                class="field remark-input"
+                rows="3"
+                :maxlength="REMARK_MAX_LENGTH"
+                placeholder="備考を入力(空にすると消去)"
+              ></textarea>
+              <div class="remark-actions">
+                <button class="btn secondary" type="button" :disabled="remarkBusy" @click="closeRemarkEditor">
+                  キャンセル
+                </button>
+                <button class="btn" type="button" :disabled="remarkBusy" @click="saveRemark">
+                  {{ remarkBusy ? '保存中…' : '保存' }}
+                </button>
+              </div>
+              <p v-if="remarkError" class="remark-error">{{ remarkError }}</p>
+            </dd>
+            <dd v-else-if="key === ITEM_REMARK_KEY">
+              <span>{{ value }}</span>
+              <button class="btn secondary remark-edit-btn" type="button" @click="startRemarkEdit">編集</button>
+            </dd>
+            <dd v-else>{{ value }}</dd>
           </div>
         </template>
       </dl>
@@ -485,6 +563,35 @@ function formatImportedAt(iso: string): string {
   margin: 0;
   font-size: 14px;
   word-break: break-word;
+}
+
+/* 備考のインライン編集: 編集ボタンは値の末尾に添える(行を押し広げない) */
+.remark-edit-btn {
+  margin-left: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.remark-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.remark-input {
+  width: 100%;
+  resize: vertical;
+}
+
+.remark-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.remark-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
 }
 
 /* 狭い画面: 金額枠は2列で支払い方法だけ1行占有 / リストはラベルを値の上に回す */

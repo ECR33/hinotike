@@ -19,6 +19,12 @@ export const ITEM_YEAR_KEY = '学年'
 export const ITEM_GROUP_KEY = 'クラス'
 export const ITEM_NAME_KEY = '氏名'
 
+/** 備考の payload キー(照会結果画面で編集可能。シート側のカラム名は rename の逆引きで決まる)。 */
+export const ITEM_REMARK_KEY = '備考'
+
+/** 備考の入力上限(文字数)。画面側と API 側で同じ値を使う。 */
+export const REMARK_MAX_LENGTH = 2000
+
 /**
  * jsonb の文字列値をカラムとして参照する PostgREST のパス表記(payload ->> key)。
  * キーに空白や非ASCIIが混ざっても通るように引用符で囲む。

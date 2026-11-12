@@ -62,7 +62,8 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
   - `.product-panel`: 商品と個数を1つの枠にまとめる。見出しに `合計 N個` と `1商品あたり最大6個`、各行は 商品名 + 星のスロット6個(`★` が個数、`☆` が残り)+ 数字の個数(`N個`)。星は飾りなので `aria-hidden` を付け、スクリーンリーダーには数字だけを読む。0個は星を薄くして数字で 0個 を出す。想定外の6個超の値は星を6個まで埋めて数字はそのまま表示する。
   - 残りは `.result-list`(`dl` の `.result-row`)のラベル/値のリスト。狭い画面(<460px)ではラベルを値の上に回す。
 - **縦詰め**: 見出し・金額枠・商品枠・残り項目をカード1枚に詰め、390×720 の viewport で結果画面はスクロールしない(検証: `node scripts/verify-items-page.mjs` の `縦詰め` 行)。枠の padding と行の padding は狭めに固定する。
-- **並びと整形**: 見出しに出すキー(氏名/学年/クラス)、枠に出すキー(購入金額・入金額・支払い方法)、入金状況のタグ、個数系キーはリスト側で重複表示しない(`entries` の `taken` で除外)。リストは 領収書 → その他(元の順) → 備考 → 取り込み日時。金額系は 3桁区切り + 円、空の値は行を出さない。キー名は `scripts/columns.config.json` と合わせる(`shared/utils/items.ts` の定数を使う)。
+- **並びと整形**: 見出しに出すキー(氏名/学年/クラス)、枠に出すキー(購入金額・入金額・支払い方法)、入金状況のタグ、個数系キーはリスト側で重複表示しない(`entries` の `taken` で除外)。リストは 領収書 → 備考 → その他(元の順) → 取り込み日時。金額系は 3桁区切り + 円、空の値は行を出さない(備考は下の編集行で必ず出す)。キー名は `scripts/columns.config.json` と合わせる(`shared/utils/items.ts` の定数を使う)。
+- **備考のインライン編集**: 備考行だけ「編集」ボタンを添える(備考が空/欠落の行も必ず出し、空行の編集が「追加」の入口になる)。textarea に書いて「保存」すると `POST /api/remark-update`(`requireRegisteredUser`、body `{code, remark}`、上限 `REMARK_MAX_LENGTH`)へ。API は code から備考セルをその場で引く(ヘッダー=1行目、列名は rename の逆引き = `shared/utils/sync.ts` の `sourceColumnFor`、セル番地は `a1Cell`)し、Sheets の `values.update`(RAW)でシートへ書き、同じ値を items payload にも反映する(空の備考はキー削除 = 取り込み側の empty skip と同じ挙動)。シートが正なので書き込み順はシート→DB で、DB 更新だけが失敗したときは `dbUpdated: false` を返して画面に注記を出す(シートは保存済みなので次の同期で一致する)。保存成功後はローカルの result を更新して再fetchしない(画面に即反映)。code が変わったら編集状態は閉じる。
 - **SSR/クライアントで同じ文字列にする**: `toLocaleString` や `localeCompare` は ICU の挙動差で hydration mismatch の原因になるので使わない(3桁区切りは正規表現、個数系の並びは code point 順、取り込み日時 JST 表記は手計算)。
 - **code が無い/見つからない**: code 無しは照会しない(API は 400 を返すだけ)し、案内カードを出す。見つからない場合もコードを添えた案内カードを出す。戻るボタンは「スキャンに戻る」と「一覧に戻る」の2つ。
 
@@ -144,6 +145,9 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
        誤削除防止のガード: ワークシート名が不一致(フォールバック)のときと取り込み 0 行のときは削除しない
    - シート読み取りは Worker 側で行う(googleapis 不使用): サービスアカウント鍵から JWT(RS256)を自前署名し
      oauth2 の jwt-bearer grant で access token を取り、Sheets REST API(v4)を fetch で読む
+   - 備考編集は同じ鍵で `values.update` を叩く(`server/utils/googleSheets.ts` の `updateCellValue`。
+     jwt-bearer の scope を `spreadsheets`(編集)に切り替えて取得する)。読み取りは `spreadsheets.readonly` のまま。
+     サービスアカウントの email を対象スプレッドシートに**編集者以上の権限**で共有していないと書き込みは 403 になる
    - 鍵は Worker の secret `GOOGLE_SERVICE_ACCOUNT_JSON`(鍵 JSON の文字列)に置く。本番の Worker は
      Supabase の Secret key を持たない(items の書き込みは RLS の `is_registered_user()` で許可する)
    - 開発中に Worker で同期を試すなら `.dev.vars` に同じ鍵 JSON を置く(`wrangler dev` は `.dev.vars` を読む。コミットしない)
