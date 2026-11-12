@@ -14,7 +14,6 @@ const me = authState.value ?? await $fetch<MeState>('/api/me', { headers: useReq
 if (authState.value === null) authState.value = me
 
 const token = ref<string | null>(null)
-const qrDataUrl = ref<string | null>(null)
 const expiresAt = ref<number | null>(null)
 const minutesLeft = ref<number | null>(null)
 const requesting = ref(false)
@@ -22,26 +21,20 @@ const requestError = ref<string | null>(null)
 const expired = ref(false)
 const waiting = ref(false)
 
-async function renderQr(value: string) {
-  // qrcode はブラウザ側でのみ使う(SSR では生成しない。ボタン操作後の client 処理)。
-  const mod = await import('qrcode')
-  qrDataUrl.value = await mod.default.toDataURL(value, { margin: 2 })
-}
-
 async function requestPermission() {
   requesting.value = true
   requestError.value = null
   expired.value = false
-  qrDataUrl.value = null
+  token.value = null
   try {
     const res = await $fetch<{ token: string; expiresAt: string | null }>(
       '/api/registration-request',
       { method: 'POST' },
     )
     token.value = res.token
+    await renderQr(res.token)
     expiresAt.value = res.expiresAt ? Date.parse(res.expiresAt) : null
     minutesLeft.value = expiresAt.value ? Math.max(0, Math.ceil((expiresAt.value - Date.now()) / 60000)) : null
-    await renderQr(res.token)
     startPolling()
   } catch (e: unknown) {
     const status = (e as { statusCode?: number }).statusCode
@@ -51,6 +44,18 @@ async function requestPermission() {
         : '依頼の作成に失敗しました。もう一度お試しください'
   } finally {
     requesting.value = false
+  }
+}
+
+const qrDataUrl = ref('')
+
+// qrcode は client 側でのみ使う(SSR で QR を描かないため dynamic import)。
+async function renderQr(value: string) {
+  try {
+    const { default: QRCode } = await import('qrcode')
+    qrDataUrl.value = await QRCode.toDataURL(value, { margin: 2, errorCorrectionLevel: 'M' })
+  } catch {
+    requestError.value = 'QRの生成に失敗しました'
   }
 }
 
@@ -117,8 +122,8 @@ onBeforeUnmount(stopPolling)
       </button>
       <p v-if="requesting" class="muted">依頼を作成しています…</p>
       <p v-if="requestError" class="error">{{ requestError }}</p>
-      <div v-if="qrDataUrl" class="qr-box">
-        <img :src="qrDataUrl" alt="許可依頼のQRコード" class="qr-img" />
+      <div v-if="token" class="qr-box">
+        <img v-if="qrDataUrl" class="qr-img" :src="qrDataUrl" alt="許可依頼QRコード">
         <p class="muted">
           有効期限: 約 {{ minutesLeft ?? '?' }} 分<span v-if="expired">(期限切れ。再生成してください)</span>
         </p>
@@ -139,10 +144,11 @@ onBeforeUnmount(stopPolling)
 .qr-box {
   margin-top: 12px;
 }
+
 .qr-img {
   width: min(280px, 60vw);
+  height: auto;
   background: #fff;
-  border-radius: 8px;
-  padding: 8px;
+  border-radius: 6px;
 }
 </style>

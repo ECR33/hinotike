@@ -5,6 +5,9 @@
  *   - 既定の許可済みユーザ: dev@example.com / dev-password-2026(npm run supabase:dev-user で作成)
  *   - 未登録ユーザのログインが失敗する場合はそのシナリオをスキップする。作成は
  *     node scripts/create-dev-user.mjs <email> <password> --no-registration
+ *
+ * 管理系(アプリ共有・利用者登録・同期・ログアウト)は「管理」dropdown に格納されたので
+ * 遷移検証は dropdown を開いて menu 内項目をクリックする。
  */
 import { chromium } from 'playwright-core'
 
@@ -34,11 +37,28 @@ async function login(email, password) {
   return { page, ctx, warns }
 }
 
-/** nav の項目ラベル(アクティブ項目には * を付く) */
+/** nav の項目ラベル(アクティブ項目には * を付く。dropdown トリガーは親 .nav-manage.active で光る) */
 function navLabels(page) {
   return page.locator('.bottom-nav .nav-item').evaluateAll((els) =>
+    els.map((el) => {
+      const active = el.classList.contains('active') || el.parentElement?.classList.contains('active')
+      return `${el.textContent.trim()}${active ? '*' : ''}`
+    }),
+  )
+}
+
+/** 管理 dropdown を開く(menu 項目ラベル。アクティブ項目には * を付く) */
+async function openMenu(page) {
+  await page.getByRole('button', { name: '管理' }).click()
+  await page.waitForTimeout(300)
+  return page.locator('.nav-menu .menu-item').evaluateAll((els) =>
     els.map((el) => `${el.textContent.trim()}${el.classList.contains('active') ? '*' : ''}`),
   )
+}
+
+/** dropdown が閉じているか(.nav-menu の個数。0 = 閉) */
+function menuCount(page) {
+  return page.locator('.nav-menu').count()
 }
 
 /** 最下部までスクロールしたとき、コンテンツが nav に重ならないか(余白ぶんは数えない) */
@@ -66,7 +86,7 @@ function record(name, value, url = '') {
   out.push(`${name}: ${typeof value === 'string' ? value : JSON.stringify(value)}${url ? ` ${url}` : ''}`)
 }
 
-// --- 許可済みユーザ: トップ / QRスキャン / 利用者登録 / ログアウト ---
+// --- 許可済みユーザ: トップ / QRスキャン / 一覧 / 管理(dropdown) ---
 const ok = await login(...approver)
 if (!ok) {
   out.push('許可済みユーザ: ログイン失敗(dev ユーザを作成してください)')
@@ -76,23 +96,47 @@ if (!ok) {
   await ok.page.waitForTimeout(600)
   record('トップ遷移', await navLabels(ok.page), path(ok.page))
 
-  await ok.page.locator('.bottom-nav .nav-item', { hasText: '利用者登録' }).click()
+  // 管理 dropdown を開いてアプリ共有へ(/share)。QRは client 側生成なので少し待つ。
+  record('管理menu項目', await openMenu(ok.page))
+  await ok.page.locator('.nav-menu .menu-item', { hasText: 'アプリ共有' }).click()
+  await ok.page.waitForTimeout(800)
+  record('アプリ共有遷移', await navLabels(ok.page), path(ok.page))
+  record('共有画面のQR画像数', await ok.page.locator('.qr-img').count())
+  record('共有画面のリンク表示', await ok.page.locator('.page .mono').first().textContent().catch(() => null))
+  record('遷移でmenu閉', await menuCount(ok.page))
+
+  // 同じ dropdown から利用者登録・同期へ(格納先ルートでは「管理」が点灯する)
+  await openMenu(ok.page)
+  await ok.page.locator('.nav-menu .menu-item', { hasText: '利用者登録' }).click()
   await ok.page.waitForTimeout(600)
   record('利用者登録遷移', await navLabels(ok.page), path(ok.page))
+  await openMenu(ok.page)
+  await ok.page.locator('.nav-menu .menu-item', { hasText: '同期' }).click()
+  await ok.page.waitForTimeout(600)
+  record('同期遷移', await navLabels(ok.page), path(ok.page))
 
-  // 照会結果はスキャンの延長なので QRスキャン が点灯する
+  // 外側クリックで閉じる
+  await openMenu(ok.page)
+  await ok.page.locator('.page h1').click()
+  await ok.page.waitForTimeout(300)
+  record('外側クリックでmenu閉', await menuCount(ok.page))
+
+  // 照会結果はスキャンの延長なので QRスキャン が点灯する(管理は点灯しない)
   await ok.page.goto(`${base}/result?code=nope`, { waitUntil: 'networkidle' })
   record('照会結果のnav', await navLabels(ok.page), path(ok.page))
   record('照会結果の重なり余白', await overlapGap(ok.page), 'px')
 
-  await ok.page.locator('.bottom-nav .nav-item', { hasText: 'ログアウト' }).click()
+  // dropdown からログアウト(menu は自分で閉じる → 未認証の nav に戻る)
+  await openMenu(ok.page)
+  await ok.page.locator('.nav-menu .menu-item', { hasText: 'ログアウト' }).click()
   await ok.page.waitForTimeout(900)
   record('navログアウト後', await navLabels(ok.page), path(ok.page))
+  record('ログアウトでmenu閉', await menuCount(ok.page))
   record('console(warn/error)', ok.warns)
   await ok.ctx.close()
 }
 
-// --- 認証済み・未登録: トップ / 許可依頼 / ログアウト ---
+// --- 認証済み・未登録: トップ / 許可依頼 / 管理(dropdown: ログアウト) ---
 const ng = await login(...newcomer)
 if (!ng) {
   out.push(
@@ -100,6 +144,7 @@ if (!ng) {
   )
 } else {
   record('未登録の着地', await navLabels(ng.page), path(ng.page))
+  record('未登録のmenu項目', await openMenu(ng.page))
   record('unauthorized の重なり余白', await overlapGap(ng.page), 'px')
   record('console(warn/error)', ng.warns)
   await ng.ctx.close()

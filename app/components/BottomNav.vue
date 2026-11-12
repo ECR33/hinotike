@@ -6,9 +6,14 @@ import type { MeState } from '#shared/utils/auth'
  *
  * 遷移先は状態によって出す:
  *  - 未認証   … トップ / ログイン(保護ページはミドルウェアが /login?returnTo= に誘導するので出さない)
- *  - 認証済み・未登録 … トップ / 許可依頼(/unauthorized) / ログアウト
- *  - 認証済み・許可済み … トップ / QRスキャン / 一覧(/items) / 利用者登録 / ログアウト
+ *  - 認証済み・未登録 … トップ / 許可依頼(/unauthorized) / 管理(ログアウト)
+ *  - 認証済み・許可済み … トップ / QRスキャン / 一覧(/items) / 管理(dropdown menu)
+ * 管理系(アプリ共有・利用者登録・同期・ログアウト)は「管理」ボタン の dropdown menu にまとめて
+ * 常駐バーの項目数を抑える。許可依頼は未登録ユーザの主動作なのでバーに直接残す。
  * ログアウトはルートではなく action(/api/logout)。
+ *
+ * dropdown はバーの上に開く。外側クリック / Escape / ルート変更で閉じる
+ * (document リスナーは onMounted のみ — SSR では document が無い)。
  *
  * 認証状態はミドルウェアと同じ useState('auth-state') を読む。app.vue の render は
  * ミドルウェア(NuxtPage の setup)より先に走るため、SSR で未缓存のときはここで解決して
@@ -36,6 +41,10 @@ const ICONS = {
   list: 'M4.5 6h.01 M4.5 12h.01 M4.5 18h.01 M8.5 6h11.5 M8.5 12h11.5 M8.5 18h11.5',
   // 同期: 循環する矢印(Sheets → items の取り込み)
   sync: 'M4.5 9a8 8 0 0 1 12.5-3.5 M19.5 15a8 8 0 0 1-12.5 3.5 M17.5 3v3h-3 M6.5 21v-3h3',
+  // 共有: 3つの点 を線で結んだ share 表記(アプリリンクのQRを他のスマホへ)
+  share: 'M8.7 12a2.2 2.2 0 1 0-4.4 0 2.2 2.2 0 0 0 4.4 0 M19.7 6a2.2 2.2 0 1 0-4.4 0 2.2 2.2 0 0 0 4.4 0 M19.7 18a2.2 2.2 0 1 0-4.4 0 2.2 2.2 0 0 0 4.4 0 M8.5 11.2 15.6 7.1 M8.5 12.8 15.6 16.9',
+  // 管理: 横3点(ellipsis)。dropdown のトリガー
+  menu: 'M5 12h.01 M12 12h.01 M19 12h.01',
 } as const
 
 interface NavItem {
@@ -49,7 +58,12 @@ interface NavItem {
   activePaths?: string[]
 }
 
-const items = computed<NavItem[]>(() => {
+interface ManageItem extends NavItem {
+  /** dropdown menu に格納する項目(dropdown 自体は遷移しない) */
+  children: NavItem[]
+}
+
+const items = computed<(NavItem | ManageItem)[]>(() => {
   const home: NavItem = { key: 'home', label: 'トップ', icon: 'home', to: '/' }
   const logoutItem: NavItem = { key: 'logout', label: 'ログアウト', icon: 'logout', action: 'logout' }
 
@@ -57,23 +71,72 @@ const items = computed<NavItem[]>(() => {
   if (!me || !me.authenticated) {
     return [home, { key: 'login', label: 'ログイン', icon: 'login', to: '/login' }]
   }
+  // 未登録: 主動作(許可依頼)はバーに残し、ログアウトだけ dropdown に格納する。
   if (!me.authorized) {
-    return [home, { key: 'request', label: '許可依頼', icon: 'request', to: '/unauthorized' }, logoutItem]
+    return [
+      home,
+      { key: 'request', label: '許可依頼', icon: 'request', to: '/unauthorized' },
+      { key: 'manage', label: '管理', icon: 'menu', children: [logoutItem] },
+    ]
   }
   return [
     home,
     { key: 'scan', label: 'QRスキャン', icon: 'scan', to: '/scan', activePaths: ['/scan', '/result'] },
     { key: 'items', label: '一覧', icon: 'list', to: '/items' },
-    { key: 'register', label: '利用者登録', icon: 'register', to: '/register' },
-    // 管理者運用: Spreadsheet → items の同期(/sync)。登録済みユーザなら実行できる。
-    { key: 'sync', label: '同期', icon: 'sync', to: '/sync' },
-    logoutItem,
+    // 管理系: アプリ共有(/share)・利用者登録(/register)・同期(/sync)・ログアウト
+    {
+      key: 'manage',
+      label: '管理',
+      icon: 'menu',
+      activePaths: ['/share', '/register', '/sync'],
+      children: [
+        { key: 'share', label: 'アプリ共有', icon: 'share', to: '/share' },
+        { key: 'register', label: '利用者登録', icon: 'register', to: '/register' },
+        { key: 'sync', label: '同期', icon: 'sync', to: '/sync' },
+        logoutItem,
+      ],
+    },
   ]
 })
 
 function isActive(item: NavItem): boolean {
-  if (!item.to) return false
-  return (item.activePaths ?? [item.to]).includes(route.path)
+  // dropdown トリガー(manage)は to を持たないが activePaths で点灯する
+  const paths = item.activePaths ?? (item.to ? [item.to] : [])
+  return paths.includes(route.path)
+}
+
+function isManage(item: NavItem | ManageItem): item is ManageItem {
+  return Array.isArray((item as ManageItem).children)
+}
+
+// dropdown menu の開閉。既定は閉じる(SSR と client 初回描画を一致させる)。
+const menuOpen = ref(false)
+function closeMenu() {
+  menuOpen.value = false
+}
+function toggleMenu() {
+  menuOpen.value = !menuOpen.value
+}
+function onDocClick(e: MouseEvent) {
+  if (!menuOpen.value) return
+  if (!(e.target as HTMLElement).closest('.nav-manage')) closeMenu()
+}
+function onDocKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') closeMenu()
+}
+onMounted(() => {
+  document.addEventListener('click', onDocClick)
+  document.addEventListener('keydown', onDocKeydown)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDocClick)
+  document.removeEventListener('keydown', onDocKeydown)
+})
+// リンク選択後は route 変化で閉じる。ログアウトは route が変わらないので自分で閉じる。
+watch(() => route.path, closeMenu)
+async function logoutFromMenu() {
+  closeMenu()
+  await logout()
 }
 </script>
 
@@ -81,8 +144,52 @@ function isActive(item: NavItem): boolean {
   <nav class="bottom-nav" aria-label="ページ遷移">
     <div class="nav-row">
       <template v-for="item in items" :key="item.key">
+        <!-- dropdown menu トリガー(管理系項目をまとめて格納) -->
+        <div v-if="isManage(item)" class="nav-manage" :class="{ active: isActive(item) }">
+          <button
+            class="nav-item"
+            type="button"
+            :aria-expanded="menuOpen"
+            aria-haspopup="true"
+            @click="toggleMenu"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path :d="ICONS[item.icon]" />
+            </svg>
+            <span>{{ item.label }}</span>
+          </button>
+          <div v-if="menuOpen" class="nav-menu" role="menu">
+            <template v-for="child in item.children" :key="child.key">
+              <button
+                v-if="child.action === 'logout'"
+                class="menu-item danger"
+                type="button"
+                role="menuitem"
+                @click="logoutFromMenu"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path :d="ICONS[child.icon]" />
+                </svg>
+                <span>{{ child.label }}</span>
+              </button>
+              <NuxtLink
+                v-else
+                class="menu-item"
+                role="menuitem"
+                :to="child.to"
+                :class="{ active: isActive(child) }"
+                :aria-current="isActive(child) ? 'page' : undefined"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path :d="ICONS[child.icon]" />
+                </svg>
+                <span>{{ child.label }}</span>
+              </NuxtLink>
+            </template>
+          </div>
+        </div>
         <button
-          v-if="item.action === 'logout'"
+          v-else-if="item.action === 'logout'"
           class="nav-item"
           type="button"
           @click="logout"
@@ -157,5 +264,71 @@ function isActive(item: NavItem): boolean {
 .nav-item.active {
   color: var(--accent);
   background: rgba(56, 189, 248, 0.12);
+}
+
+/* dropdown トリガー(.nav-manage.active の子ボタンを光らせる) */
+.nav-manage {
+  position: relative;
+  flex: 1;
+}
+
+.nav-manage.active .nav-item {
+  color: var(--accent);
+  background: rgba(56, 189, 248, 0.12);
+}
+
+/* バーの上に開くメニュー(右端トリガーなので右揃えで配置し、行からはみ出さない) */
+.nav-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  min-width: 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: rgba(15, 23, 42, 0.98);
+  border: 1px solid #334155;
+  border-radius: 12px;
+  box-shadow: 0 -6px 18px rgba(0, 0, 0, 0.45);
+  z-index: 40;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.menu-item svg {
+  width: 18px;
+  height: 18px;
+  color: var(--muted);
+}
+
+.menu-item:hover {
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.menu-item.active {
+  color: var(--accent);
+}
+
+.menu-item.danger {
+  color: var(--danger);
+}
+
+.menu-item.danger svg {
+  color: var(--danger);
 }
 </style>

@@ -16,6 +16,8 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
 | `/items` | 必要 | `items` のレコード一覧(スクロールで追記 + code/氏名のインクリメンタル検索 + 折りたたみできる年・組の絞り込み[単独 chip / 年×組マトリクス] + 条件リセット) |
 | `/unauthorized` | 不要(案内用) | Google認証済みだが users に紐付けがない場合の案内 + 許可依頼QR |
 | `/register` | 必要(登録済み) | 利用者登録画面: 許可依頼QRを読んで依頼者のemail確認 → 許可 |
+| `/share` | 必要(登録済み) | アプリ共有: アプリのトップURLのQRを表示。別のスマホのカメラ/QRリーダーで読むとトップが開き、未登録なら許可依頼フロー(/unauthorized)へ自動接続される |
+| `/sync` | 必要(登録済み) | Spreadsheet 同期の管理画面(設定保存 → プレビュー → 確定 upsert) |
 
 ### Bottom navigation(`app/components/BottomNav.vue`)
 
@@ -24,10 +26,11 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
 | 状態 | 表示項目 |
 |---|---|
 | 未認証 | トップ / ログイン(`/login`) |
-| 認証済み・未登録 | トップ / 許可依頼(`/unauthorized`) / ログアウト |
-| 認証済み・許可済み | トップ / QRスキャン(`/scan`) / 一覧(`/items`) / 利用者登録(`/register`) / ログアウト |
+| 認証済み・未登録 | トップ / 許可依頼(`/unauthorized`) / 管理(dropdown: ログアウト) |
+| 認証済み・許可済み | トップ / QRスキャン(`/scan`) / 一覧(`/items`) / 管理(dropdown: アプリ共有`/share`・利用者登録`/register`・同期`/sync`・ログアウト) |
 
-- ログアウトはルートではなく action(`useLogout()` → `POST /api/logout` → `/`)。ページ内の「ログアウト」ボタンは重複なので撤去した(`/index`・`/login`・`/scan`・`/register`・`/unauthorized`)。
+- 管理系項目は「管理」ボタンの dropdown menu にまとめて常駐バーの項目数を抑える(dropdown はバーの上に開く。外側クリック / Escape / ルート変更で閉じる。格納先ルート(`/share`・`/register`・`/sync`)にいるとき「管理」が点灯し、menu 内の現ページは `aria-current="page"`)。許可依頼は未登録ユーザの主動作なのでバーに直接残す。
+- ログアウトはルートではなく action(`useLogout()` → `POST /api/logout` → `/`)。ページ内の「ログアウト」ボタンは重複なので撤去した(`/index`・`/login`・`/scan`・`/register`・`/unauthorized`)。バー時代のログアウトは dropdown 内(dropdown 項目は route を変わらないので選択時に自前で閉じる)。
 - `/result` では QRスキャン が点灯する(スキャンの延長という扱い)。
 - 未認証時に保護リンクを出さない理由: ミドルウェアが `/login?returnTo=` に誘導するため、押しても遷移しない(出すと「動かないリンク」になる)。
 - `app.vue` の render はミドルウェア(NuxtPage の setup)より先に走るため、BottomNav は SSR で未缓存の `auth-state` を自分で解決して缓存に入れる。ページ(`index`/`login`/`unauthorized`)も同じ缓存を再利用するので `/api/me` の重複照会にならない。
