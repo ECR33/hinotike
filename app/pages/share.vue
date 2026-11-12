@@ -9,8 +9,8 @@
  * 既存の許可依頼フローに automatic に接続する(リンクに専用パラメータは載せない)。
  *
  * QRの中身: 設定の appUrl(本番の公開URL)。未設定(dev)では現在の origin を使う。
- * 描画は qrcode ライブラリの toDataURL(client で dynamic import)。
- * 読み取りは相手のスマホのカメラ/リーダー)。
+ * 描画は QrDots ドットスタイル(app/components/QrDots.vue。既存の qrcode ライブラリの
+ * QRCode.create から SVG に描き直すだけ。読み取りは相手のスマホのカメラ/リーダー)。
  * ログアウトは BottomNav の dropdown に移動したのでページ内ボタンは無い。
  */
 
@@ -21,8 +21,8 @@ const config = useRuntimeConfig()
 const appLink = ref('')
 const copied = ref(false)
 const errorMessage = ref<string | null>(null)
-// QR の dataURL。同じURLでも「QR再生成」で作り直せるようにする。
-const qrDataUrl = ref('')
+// QrDots の expose(render)。同じURLでも「QR再生成」で作り直せるようにする。
+const qrEl = ref<{ render: (value: string) => Promise<void> } | null>(null)
 
 async function copyLink() {
   errorMessage.value = null
@@ -35,20 +35,8 @@ async function copyLink() {
   }
 }
 
-// qrcode は client 側でのみ使う(SSR で QR を描かないため dynamic import)。
-async function renderQr(value: string) {
-  errorMessage.value = null
-  try {
-    const { default: QRCode } = await import('qrcode')
-    qrDataUrl.value = await QRCode.toDataURL(value, { margin: 2, errorCorrectionLevel: 'M' })
-  } catch {
-    errorMessage.value = 'QRの生成に失敗しました'
-  }
-}
-
 onMounted(() => {
   appLink.value = String(config.public.appUrl ?? '') || window.location.origin
-  void renderQr(appLink.value)
 })
 </script>
 
@@ -64,11 +52,11 @@ onMounted(() => {
       </p>
       <p v-if="appLink" class="mono">リンク: {{ appLink }}</p>
       <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
-      <div v-if="appLink && qrDataUrl" class="qr-box">
-        <img class="qr-img" :src="qrDataUrl" alt="アプリ共有QRコード">
+      <div v-if="appLink" class="qr-box">
+        <QrDots ref="qrEl" :value="appLink" />
       </div>
       <div class="actions">
-        <button class="btn secondary" type="button" :disabled="!appLink" @click="renderQr(appLink)">
+        <button class="btn secondary" type="button" :disabled="!appLink" @click="qrEl?.render(appLink)">
           QR再生成
         </button>
         <button class="btn secondary" type="button" :disabled="!appLink" @click="copyLink">
@@ -105,11 +93,9 @@ onMounted(() => {
   margin-top: 12px;
 }
 
-.qr-img {
-  width: min(280px, 60vw);
-  height: auto;
-  background: #fff;
-  border-radius: 6px;
+.qr-box {
+  display: flex;
+  justify-content: center;
 }
 
 .actions {

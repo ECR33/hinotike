@@ -12,3 +12,5 @@ scripts/service-account.json
 # supabase CLI のローカル状態(開発キー/シークレットやログを含むのでコミットしない)
 supabase/.temp/
 supabase/.branches/
+# QR 描画/スキャンの実測用一時 debug(実測の痕跡だけローカルに残す。コミットしない)
+scripts/.qr-dbg-*

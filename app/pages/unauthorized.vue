@@ -32,7 +32,6 @@ async function requestPermission() {
       { method: 'POST' },
     )
     token.value = res.token
-    await renderQr(res.token)
     expiresAt.value = res.expiresAt ? Date.parse(res.expiresAt) : null
     minutesLeft.value = expiresAt.value ? Math.max(0, Math.ceil((expiresAt.value - Date.now()) / 60000)) : null
     startPolling()
@@ -44,18 +43,6 @@ async function requestPermission() {
         : '依頼の作成に失敗しました。もう一度お試しください'
   } finally {
     requesting.value = false
-  }
-}
-
-const qrDataUrl = ref('')
-
-// qrcode は client 側でのみ使う(SSR で QR を描かないため dynamic import)。
-async function renderQr(value: string) {
-  try {
-    const { default: QRCode } = await import('qrcode')
-    qrDataUrl.value = await QRCode.toDataURL(value, { margin: 2, errorCorrectionLevel: 'M' })
-  } catch {
-    requestError.value = 'QRの生成に失敗しました'
   }
 }
 
@@ -123,7 +110,7 @@ onBeforeUnmount(stopPolling)
       <p v-if="requesting" class="muted">依頼を作成しています…</p>
       <p v-if="requestError" class="error">{{ requestError }}</p>
       <div v-if="token" class="qr-box">
-        <img v-if="qrDataUrl" class="qr-img" :src="qrDataUrl" alt="許可依頼QRコード">
+        <QrDots :value="token" />
         <p class="muted">
           有効期限: 約 {{ minutesLeft ?? '?' }} 分<span v-if="expired">(期限切れ。再生成してください)</span>
         </p>
@@ -145,10 +132,8 @@ onBeforeUnmount(stopPolling)
   margin-top: 12px;
 }
 
-.qr-img {
-  width: min(280px, 60vw);
-  height: auto;
-  background: #fff;
-  border-radius: 6px;
+.qr-box {
+  display: flex;
+  justify-content: center;
 }
 </style>

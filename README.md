@@ -16,7 +16,7 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
 | `/items` | 必要 | `items` のレコード一覧(スクロールで追記 + code/氏名のインクリメンタル検索 + 折りたたみできる年・組の絞り込み[単独 chip / 年×組マトリクス] + 条件リセット) |
 | `/unauthorized` | 不要(案内用) | Google認証済みだが users に紐付けがない場合の案内 + 許可依頼QR |
 | `/register` | 必要(登録済み) | 利用者登録画面: 許可依頼QRを読んで依頼者のemail確認 → 許可 |
-| `/share` | 必要(登録済み) | アプリ共有: アプリのトップURLのQRを表示。別のスマホのカメラ/QRリーダーで読むとトップが開き、未登録なら許可依頼フロー(/unauthorized)へ自動接続される |
+| `/share` | 必要(登録済み) | アプリ共有: アプリのトップURLのQRを表示。別のスマホのカメラ/QRリーダーで読むとトップが開き、未登録なら許可依頼フロー(/unauthorized)へ自動接続される。QRはドットスタイル描画(`app/components/QrDots.vue`、qrcode-vue3 の dot style 参考。既存の qrcode ライブラリの BitMatrix を SVG に描き直すだけ。finder は走査線比率 1:1:3:1:1 を保つ rounded 形なので jsQR/zxing/native リーダーで読める) |
 | `/sync` | 必要(登録済み) | Spreadsheet 同期の管理画面(設定保存 → プレビュー → 確定 upsert) |
 
 ### Bottom navigation(`app/components/BottomNav.vue`)

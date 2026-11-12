@@ -101,7 +101,7 @@ if (!ok) {
   await ok.page.locator('.nav-menu .menu-item', { hasText: 'アプリ共有' }).click()
   await ok.page.waitForTimeout(800)
   record('アプリ共有遷移', await navLabels(ok.page), path(ok.page))
-  record('共有画面のQR画像数', await ok.page.locator('.qr-img').count())
+  record('共有画面のQR描画数', await ok.page.locator('.qr-svg').count())
   record('共有画面のリンク表示', await ok.page.locator('.page .mono').first().textContent().catch(() => null))
   record('遷移でmenu閉', await menuCount(ok.page))
 
