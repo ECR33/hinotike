@@ -50,8 +50,9 @@ const supabaseConfigured = Boolean(config.public?.supabase?.url && config.public
         <p class="muted">
           QR読み取り・結果表示には Google認証 + usersテーブルへの事前登録が必要です。
         </p>
-        <!-- 素の a href: SPAルーティングを通さずサーバーリダイレクトで OAuth に進む -->
-        <a class="btn" :href="loginHref">Googleでログイン</a>
+        <!-- 素の a href の意味は保つ(GoogleLoginButton が preventDefault+location.href でサーバーリダイレクトへ):
+             SPAルーティングを通さず OAuth に進む。クリック後スピナーで進行中を示す -->
+        <GoogleLoginButton :href="loginHref" />
         <p v-if="!supabaseConfigured" class="error">
           .env に Supabase の URL / key を設定してください。
         </p>

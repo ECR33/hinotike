@@ -69,7 +69,7 @@ async function devLogin() {
 
       <template v-else>
         <p class="muted">Google アカウントでログインします。利用には事前登録(email)が必要です。</p>
-        <a class="btn" :href="loginHref">Googleでログイン</a>
+        <GoogleLoginButton :href="loginHref" />
         <p v-if="!supabaseConfigured" class="error">
           .env に Supabase の URL / key を設定してください。
         </p>
@@ -81,7 +81,10 @@ async function devLogin() {
       <div class="row">
         <input v-model="devEmail" placeholder="email" />
         <input v-model="devPassword" type="password" placeholder="password" />
-        <button class="btn" :disabled="devBusy" @click="devLogin">dev ログイン</button>
+        <button class="btn" :disabled="devBusy" :aria-busy="devBusy" @click="devLogin">
+          <span v-if="devBusy" class="spinner" aria-hidden="true"></span>
+          {{ devBusy ? 'ログイン中…' : 'dev ログイン' }}
+        </button>
       </div>
       <p v-if="devError" class="error">{{ devError }}</p>
       <p class="muted">
