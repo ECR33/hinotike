@@ -1,12 +1,12 @@
 <script setup lang="ts">
 // 保護は app/middleware/auth.global.ts(グローバル+ホワイトリスト)で行う
 
-import { ITEM_GROUP_KEY, ITEM_NAME_KEY, ITEM_REMARK_KEY, ITEM_YEAR_KEY, REMARK_MAX_LENGTH, payloadValue } from '#shared/utils/items'
+import { isQuantityKey, ITEM_GROUP_KEY, ITEM_NAME_KEY, ITEM_REMARK_KEY, ITEM_YEAR_KEY, payloadValue, quantityName, REMARK_MAX_LENGTH } from '#shared/utils/items'
 
 const route = useRoute()
 const code = computed(() => String(route.query.code ?? ''))
 
-type LookupResult = { found: boolean; code: string; row: Record<string, unknown> | null }
+type LookupResult = { found: boolean; code: string; row: Record<string, unknown> | null; productOrder?: string[] }
 type RemarkUpdateResponse = {
   ok: true
   code: string
@@ -107,9 +107,6 @@ const STATUS_KEY = '入金状況'
 /** 金額・支払いのまとまり(枠で囲んで横に並べる)。表示順はこの並び。 */
 const MONEY_KEYS = ['購入金額', '入金額', '支払い方法']
 
-/** 商品個数のキーsuffix(スプレッドシート側のカラム名。全角括弧も扱う)。 */
-const QUANTITY_SUFFIXES = ['(個数)', '（個数）']
-
 /** レビューの星のような個数表示のスロット数(商品の最大個数)。 */
 const PRODUCT_MAX = 6
 
@@ -138,25 +135,22 @@ const money = computed<Array<{ key: string; label: string; value: string; wide: 
   }))
 })
 
-/** キー名から商品名を取り出す(「ひのドッグ(個数)」→「ひのドッグ」。括弧が無ければキー名そのまま)。 */
-function quantityName(key: string): string {
-  for (const suffix of QUANTITY_SUFFIXES) {
-    if (key.endsWith(suffix)) return key.slice(0, -suffix.length) || key
-  }
-  return key
-}
-
-function isQuantityKey(key: string): boolean {
-  return QUANTITY_SUFFIXES.some((suffix) => key.endsWith(suffix))
-}
-
-/** 個数系キーを商品名・個数(数値なら count、想定外の値なら raw)にまとめる。 */
+/**
+ * 個数系キーを商品名・個数(数値なら count、想定外の値なら raw)にまとめる。
+ * 並びは lookup が返す商品表示順(同期設定の include_columns の並び。/sync で調整できる)。
+ * 順に載っていないキーは末尾に回し、その中では比較順(環境差のない並び。
+ * localeCompare は ICU の挙動差で SSR/クライアントの文字列がずれ得る)。
+ */
 const quantities = computed<Array<{ key: string; name: string; count: number | null; raw: string }>>(() => {
   const p = payload.value
+  const order = result.value?.productOrder ?? []
+  const rank = (key: string): number => {
+    const i = order.indexOf(key)
+    return i === -1 ? order.length : i
+  }
   return Object.keys(p)
     .filter((key) => isQuantityKey(key) && !isBlank(p[key]))
-    // 環境差のない並び(localeCompare は ICU の挙動差で SSR/クライアントの文字列がずれ得る)
-    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0))
     .map((key) => {
       const raw = String(p[key])
       return { key, name: quantityName(key), count: /^\d+$/.test(raw) ? Number(raw) : null, raw }

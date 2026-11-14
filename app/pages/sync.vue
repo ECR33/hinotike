@@ -198,7 +198,7 @@ function sampleEntries(row: { payload: Record<string, string> }): string {
       <label class="label" for="codeColumn">code カラム(QR 照会キー)</label>
       <input id="codeColumn" class="field" v-model="codeColumn" placeholder="ID" />
 
-      <label class="label" for="includeColumns">取り込みカラム(空 = 全カラム。改行/カンマ区切り)</label>
+      <label class="label" for="includeColumns">取り込みカラム(空 = 全カラム。改行/カンマ区切り。個数カラムの並び順が照会結果の商品表示順になります)</label>
       <textarea id="includeColumns" class="field" rows="8" v-model="includeColumns"></textarea>
 
       <label class="label" for="excludeColumns">除外カラム(取り込みカラムが空のとき有効)</label>

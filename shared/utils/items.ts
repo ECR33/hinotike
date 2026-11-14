@@ -5,6 +5,8 @@
  * 初期シードは shared/utils/sync.ts の DEFAULT_SYNC_SETTINGS)と一致させること。
  * キー名を変えたい場合はこの定数だけ直せば一覧行・検索が追随し、取り込み側は
  * /sync の設定画面(sync_settings の行)で同じキーに合わせる。
+ * 商品(個数系キー)の表示順は productOrderKeys で、同期設定の includeColumns の並びが正
+ * (/sync の「取り込みカラム」の行順をアプリから調整できる)。
  * Nuxt 依存の import は置かない(server / shared どちらでも読めるように)。
  */
 
@@ -24,6 +26,42 @@ export const ITEM_REMARK_KEY = '備考'
 
 /** 備考の入力上限(文字数)。画面側と API 側で同じ値を使う。 */
 export const REMARK_MAX_LENGTH = 2000
+
+/**
+ * 個数系(payload の商品)キーの suffix。シート側のカラム名(「ひのドッグ(個数)」など)。
+ * 全角括弧も扱う(シート表記の揺れ対策)。
+ */
+export const QUANTITY_SUFFIXES = ['(個数)', '（個数）']
+
+/** 個数系キーかどうか(末尾が suffix のどれか)。 */
+export function isQuantityKey(key: string): boolean {
+  return QUANTITY_SUFFIXES.some((suffix) => key.endsWith(suffix))
+}
+
+/** キー名から商品名を取り出す(「ひのドッグ(個数)」→「ひのドッグ」。括弧が無ければキー名そのまま)。 */
+export function quantityName(key: string): string {
+  for (const suffix of QUANTITY_SUFFIXES) {
+    if (key.endsWith(suffix)) return key.slice(0, -suffix.length) || key
+  }
+  return key
+}
+
+/**
+ * 商品欄の表示順(payload キー)。同期設定の includeColumns の並びを rename 適用後のキーに
+ * 写して個数系だけ残す(重複は最初のみ)。空 = 順が未指定(呼ぶ側はフォールバックの並びを使う)。
+ * /sync の「取り込みカラム」の行順がそのまま商品表示順になる。
+ */
+export function productOrderKeys(includeColumns: string[], rename: Record<string, string>): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const col of includeColumns) {
+    const key = rename[col] ?? col
+    if (!isQuantityKey(key) || seen.has(key)) continue
+    seen.add(key)
+    out.push(key)
+  }
+  return out
+}
 
 /**
  * jsonb の文字列値をカラムとして参照する PostgREST のパス表記(payload ->> key)。

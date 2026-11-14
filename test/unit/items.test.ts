@@ -21,11 +21,15 @@ import {
   parsePair,
   payloadTextColumn,
   payloadValue,
+  productOrderKeys,
+  quantityName,
+  isQuantityKey,
   facetPairCounts,
   missingPairCount,
   quoteInValue,
   SEARCH_FILTER_MAX_LENGTH,
 } from '../../shared/utils/items'
+import { DEFAULT_SYNC_SETTINGS } from '../../shared/utils/sync'
 
 describe('normalizeFilter(検索入力の正規化)', () => {
   it('前後の空白だけ・空文字・非文字列は条件なし(null)', () => {
@@ -247,5 +251,56 @@ describe('facetPairCounts / missingPairCount(マトリクスのセル)', () => {
 
   it('pairKey はセルの識別子(選択状態の集合に使う)', () => {
     expect(pairKey({ year: '1', group: '3' })).toBe('1:3')
+  })
+})
+
+describe('productOrderKeys / quantityName / isQuantityKey(商品欄の表示順)', () => {
+  it('既定の同期設定の並び = 商品表示順(ひのドッグ→やきそば→麦茶→サイダー→カルピス→りんご→ゲーム)', () => {
+    expect(productOrderKeys(DEFAULT_SYNC_SETTINGS.includeColumns, DEFAULT_SYNC_SETTINGS.rename)).toEqual([
+      'ひのドッグ(個数)',
+      'やきそば(個数)',
+      '麦茶(個数)',
+      'サイダー(個数)',
+      'カルピス(個数)',
+      'りんご(個数)',
+      'ゲーム(個数)',
+    ])
+  })
+
+  it('includeColumns の行順がそのまま表示順になる(商品を並び替えられる)', () => {
+    expect(
+      productOrderKeys(['ゲーム(個数)', '麦茶(個数)', 'ひのドッグ(個数)'], {}),
+    ).toEqual(['ゲーム(個数)', '麦茶(個数)', 'ひのドッグ(個数)'])
+  })
+
+  it('個数系以外のカラムは順から落ち、rename はキー名に反映される', () => {
+    expect(
+      productOrderKeys(['氏名', 'やきそば(個数)', '領収書が必要な方はチェックをお願いします。'], {
+        '領収書が必要な方はチェックをお願いします。': '領収書',
+        '犬(個数)': 'ひのドッグ(個数)',
+      }),
+    ).toEqual(['やきそば(個数)'])
+    // rename 後のキーが個数系なら順に載る
+    expect(productOrderKeys(['犬(個数)', '麦茶(個数)'], { '犬(個数)': 'ひのドッグ(個数)' })).toEqual([
+      'ひのドッグ(個数)',
+      '麦茶(個数)',
+    ])
+  })
+
+  it('全角括弧の suffix も個数系として扱い、重複は最初のみ残す', () => {
+    expect(isQuantityKey('麦茶（個数）')).toBe(true)
+    expect(isQuantityKey('麦茶')).toBe(false)
+    expect(productOrderKeys(['麦茶（個数)', '麦茶（個数）', '麦茶（個数）'], {})).toEqual(['麦茶（個数）'])
+  })
+
+  it('商品名取り出し: suffix を除く/括弧无はそのまま/suffix のみのキーはキー名のまま', () => {
+    expect(quantityName('ひのドッグ(個数)')).toBe('ひのドッグ')
+    expect(quantityName('りんご（個数）')).toBe('りんご')
+    expect(quantityName('備考')).toBe('備考')
+    expect(quantityName('(個数)')).toBe('(個数)')
+  })
+
+  it('空の includeColumns は順未指定(空配列。呼ぶ側がフォールバックの並びを使う)', () => {
+    expect(productOrderKeys([], {})).toEqual([])
   })
 })
