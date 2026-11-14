@@ -15,6 +15,7 @@ import {
   nextCursor,
   normalizeFilter,
   normalizePairs,
+  normalizeRemarkState,
   normalizeSelection,
   pairConditions,
   pairKey,
@@ -27,6 +28,7 @@ import {
   facetPairCounts,
   missingPairCount,
   quoteInValue,
+  remarkAbsentConditions,
   SEARCH_FILTER_MAX_LENGTH,
 } from '../../shared/utils/items'
 import { DEFAULT_SYNC_SETTINGS } from '../../shared/utils/sync'
@@ -81,6 +83,27 @@ describe('payloadTextColumn / payloadValue(jsonb payload の参照と取り出�
     expect(payloadValue(payload, '氏名')).toBe('')
     expect(payloadValue(payload, '備考')).toBe('')
     expect(payloadValue(undefined, '氏名')).toBe('')
+  })
+})
+
+describe('normalizeRemarkState / remarkAbsentConditions(備考の有無の絞り込み)', () => {
+  it('認識した値はそのまま、それ以外は条件なし(any)', () => {
+    expect(normalizeRemarkState('present')).toBe('present')
+    expect(normalizeRemarkState('absent')).toBe('absent')
+    expect(normalizeRemarkState('any')).toBe('any')
+    expect(normalizeRemarkState('PRESENT')).toBe('present') // 大文字・空白は吸収する
+    expect(normalizeRemarkState('  absent  ')).toBe('absent')
+    expect(normalizeRemarkState('present,absent')).toBe('any') // 複数値は条件なし(壊れた値で絞り込みを止めない)
+    expect(normalizeRemarkState('yes')).toBe('any')
+    expect(normalizeRemarkState(undefined)).toBe('any')
+    expect(normalizeRemarkState(null)).toBe('any')
+    expect(normalizeRemarkState(123)).toBe('any')
+  })
+
+  it('「なし」は備考キーの欠落(null)と空文字の両方を包含する論理木にする', () => {
+    expect(remarkAbsentConditions()).toBe('payload->>"備考".is.null,payload->>"備考".eq.""')
+    // キー名を変えられる(同期設定の rename 後も追随できるように引数で渡す)
+    expect(remarkAbsentConditions('メモ')).toBe('payload->>"メモ".is.null,payload->>"メモ".eq.""')
   })
 })
 

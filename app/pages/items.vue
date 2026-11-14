@@ -10,10 +10,10 @@
  * まだ見えている限り追記し続ける(1バッチで viewport が埋まらない場合もここで自己継続する)。
  * IntersectionObserver が無い環境では手動ボタンにフォールバックする。
  *
- * 検索は code と氏名の部分一致(incremental search): 入力を SEARCH_DEBOUNCE_MS でまとめ、
+ * 検索は code・氏名・備考の部分一致(incremental search): 入力を SEARCH_DEBOUNCE_MS でまとめ、
  * 条件が変わるたびリストを reset + 1ページ目から取り直す。応答は generation で比較して
  * 後発の検索に負けた古い応答を捨て、乱順応答でリストが古い条件の結果に戻るのを防ぐ。
- * URL と検索条件は同期しない(タイプごとに router.replace しない。初期値だけ ?code=&name=&years=&groups= を読む)。
+ * URL と検索条件は同期しない(タイプごとに router.replace しない。初期値だけ ?code=&name=&years=&groups=&pairs=&remark=&remarkState= を読む)。
  *
  * 行タップで /result に開いて一覧に戻ると、絞り込み条件・読み込み済みの行・スクロール位置を
  * そのまま復活させる(keepalive。複数の絞り込み結果を1件ずつ開いて確認する用途)。
@@ -27,16 +27,24 @@
  * 選択肢は GET /api/items-facets(items 全体の値・ペアの件数)から読み、現在の絞り込み結果には連動しない。
  * chip・セル・リセットはデバウンスを待たずに即適用する。
  * 入力の消去は app/components/ClearableInput.vue(Vuetify の clearable 相当: 値があるとき右端に消去ボタン)。
+ *
+ * 備考の絞り込み(折りたたみできる1つの欄)は2つの条件:
+ *  - 有無: 「すべて / あり / なし」の1行のボタン(3状態)。なし = 備考キーの欠落・null・空文字。
+ *  - 文字列: 備考の部分一致入力(code・氏名と同じデバウンスで絞る)。
+ * 欄は閉じると1つのボタン行だけなので、条件領域は普段は大きくならない(閉じていても
+ *  選択状態はトグルのラベルに出す)。有無ボタンは即適用、入力はデバウンス。
  */
 import {
   ITEM_PAGE_SIZE,
   normalizeFilter,
   normalizePairs,
+  normalizeRemarkState,
   normalizeSelection,
   pairKey,
   type FacetOption,
   type FacetPairCount,
   type ItemRowData,
+  type RemarkState,
 } from '#shared/utils/items'
 
 interface ItemsPage {
@@ -76,30 +84,42 @@ const initialGroups = normalizeSelection(route.query.groups)
 const initialPairs = normalizePairs(route.query.pairs).map(pairKey)
 /** ペア選択が URL にあれば組み合わせモードで始める(単独選択と同時に送られたら両方 AND になる)。 */
 const initialMode: FacetMode = initialPairs.length ? 'pair' : 'single'
+/** 備考の部分一致入力と有無(URL の `?remark=` / `?remarkState=present|absent` だけ読む)。 */
+const initialRemark = normalizeFilter(route.query.remark) ?? ''
+const initialRemarkState = normalizeRemarkState(route.query.remarkState)
 
 const codeInput = ref(initialCode)
 const nameInput = ref(initialName)
+const remarkInput = ref(initialRemark)
 /** 選択済みの facet 値。chip / セルの toggle で即変わる(デバウンスなし)。 */
 const years = ref<string[]>(initialYears)
 const groups = ref<string[]>(initialGroups)
 /** 選択済みのペア(`年:組` の key)。組み合わせモードだけ条件に反映する。 */
 const pairs = ref<string[]>(initialPairs)
 const facetMode = ref<FacetMode>(initialMode)
+/** 備考の有無(any=条件なし / present / absent)。有無ボタンは即適用する。 */
+const remarkState = ref<RemarkState>(initialRemarkState)
 /** 年・組の欄は縦に場所を取る(年9×組5 のマトリクス)ので、折りたたんで一覧を先に大きく見せる。
  *  初期選択があれば開いておく(消した条件を隠さない)。 */
 const facetSectionOpen = ref(initialYears.length + initialGroups.length + initialPairs.length > 0)
+/** 備考の欄も折りたたみ(閉じるとボタン1行だけ。条件領域を普段は大きくしない)。初期条件があれば開く。 */
+const remarkSectionOpen = ref(initialRemarkState !== 'any' || !!initialRemark)
 const active = ref<{
   code: string
   name: string
   years: string[]
   groups: string[]
   pairs: string[]
+  remark: string
+  remarkState: RemarkState
 }>({
   code: initialCode,
   name: initialName,
   years: initialYears,
   groups: initialGroups,
   pairs: initialPairs,
+  remark: initialRemark,
+  remarkState: initialRemarkState,
 })
 
 const rows = ref<ItemRowData[]>([])
@@ -122,6 +142,8 @@ const cachedFirst = useState<{
   years: string[]
   groups: string[]
   pairs: string[]
+  remark: string
+  remarkState: RemarkState
   page: ItemsPage
 } | null>('items-first-page', () => null)
 
@@ -139,6 +161,8 @@ interface FilterCondition {
   years: string[]
   groups: string[]
   pairs: string[]
+  remark: string
+  remarkState: RemarkState
 }
 
 // IntersectionObserver の有無はクライアントでのしか分からない(SSR では undefined)。
@@ -160,6 +184,8 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
   const gen = generation
   const code = active.value.code
   const name = active.value.name
+  const remark = active.value.remark
+  const remarkStateApplied = active.value.remarkState
   // facet は applyFilters で active に写してから load を呼ぶので、ここで読んだ値は適用済み条件
   const selectedYears = years.value
   const selectedGroups = groups.value
@@ -177,6 +203,9 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
         years: selectedYears.length ? selectedYears : undefined,
         groups: selectedGroups.length ? selectedGroups : undefined,
         pairs: selectedPairs.length ? selectedPairs : undefined,
+        remark: remark || undefined,
+        // 条件なし(any)は送らない(URL を短く保つ。既定の状態は「送らない」と同じ)
+        remarkState: remarkStateApplied === 'any' ? undefined : remarkStateApplied,
         cursor: cur ?? undefined,
         limit: ITEM_PAGE_SIZE,
       },
@@ -194,6 +223,8 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
         years: selectedYears,
         groups: selectedGroups,
         pairs: selectedPairs,
+        remark,
+        remarkState: remarkStateApplied,
         page,
       }
     }
@@ -228,6 +259,8 @@ function currentCondition(): FilterCondition {
     years: [...years.value],
     groups: [...groups.value],
     pairs: [...pairs.value],
+    remark: normalizeFilter(remarkInput.value) ?? '',
+    remarkState: remarkState.value,
   }
 }
 
@@ -237,7 +270,9 @@ function sameCondition(a: FilterCondition, b: FilterCondition): boolean {
     a.name === b.name &&
     sameSelection(a.years, b.years) &&
     sameSelection(a.groups, b.groups) &&
-    sameSelection(a.pairs, b.pairs)
+    sameSelection(a.pairs, b.pairs) &&
+    a.remark === b.remark &&
+    a.remarkState === b.remarkState
   )
 }
 
@@ -295,23 +330,34 @@ function setMode(next: FacetMode) {
   applyNow()
 }
 
+/** 備考の有無を選ぶ(すべて=条件なし)。同じ状態を再押は無視する。即適用して欄は開いたまま。 */
+function setRemarkState(next: RemarkState) {
+  if (next === remarkState.value) return
+  remarkState.value = next
+  applyNow()
+}
+
 /** UI に表示されている条件のどれかが入っているか(リセットボタンの有効判定)。 */
 const hasFilters = computed(
   () =>
     !!codeInput.value ||
     !!nameInput.value ||
+    !!remarkInput.value ||
     years.value.length > 0 ||
     groups.value.length > 0 ||
-    pairs.value.length > 0,
+    pairs.value.length > 0 ||
+    remarkState.value !== 'any',
 )
 
-/** 絞り込み条件を一度に消す(code・氏名・年・組・ペアのすべて)。選択モードは維持する。条件がなければ無効。 */
+/** 絞り込み条件を一度に消す(code・氏名・年・組・ペア・備考の有無と検索)。選択モードは維持する。条件がなければ無効。 */
 function resetFilters() {
   codeInput.value = ''
   nameInput.value = ''
+  remarkInput.value = ''
   years.value = []
   groups.value = []
   pairs.value = []
+  remarkState.value = 'any'
   applyNow()
 }
 
@@ -324,7 +370,17 @@ const facetSelectionSummary = computed(() => {
   return parts.length ? parts.join(' + ') : '選択なし'
 })
 
-watch([codeInput, nameInput], () => {
+/** 備考欄のラベル。閉じていても有無の選択と検索入力が見える(長い入物は省略して短く出す)。 */
+const remarkSelectionSummary = computed(() => {
+  const presence =
+    remarkState.value === 'present' ? 'あり' : remarkState.value === 'absent' ? 'なし' : 'すべて'
+  const term = remarkInput.value.trim()
+  if (!term) return presence
+  const shown = term.length > 8 ? `${term.slice(0, 8)}…` : term
+  return `${presence} + 「${shown}」`
+})
+
+watch([codeInput, nameInput, remarkInput], () => {
   pending.value = true
   if (debounceTimer) clearTimeout(debounceTimer)
   debounceTimer = setTimeout(() => {
@@ -429,6 +485,8 @@ const reuseFirstPage =
     years: initialYears,
     groups: initialGroups,
     pairs: initialPairs,
+    remark: initialRemark,
+    remarkState: initialRemarkState,
   })
 
 if (reuseFirstPage && cachedFirst.value) {
@@ -454,85 +512,135 @@ await Promise.all(initialLoads)
         <ClearableInput v-model="codeInput" label="code(部分一致)" placeholder="コードの一部を入力" />
         <ClearableInput v-model="nameInput" label="氏名(部分一致)" placeholder="氏名の一部を入力" />
 
-        <!-- 年・組の欄は縦に場所を取る(年9×組5)ので折りたたみできる。閉じても選択状態はラベルに出す -->
-        <div class="facet-section">
+        <!-- 折りたたみ欄のトグル(年・組 / 備考)。ラベルは短くして2つのトグルが1行に並ぶようにする(閉じた時の条件領域は1行のまま)。
+            閉じていても選択状態はラベルに出て、開閉の意味は aria-label で伝える -->
+        <div class="filter-toggles">
           <button
             class="btn secondary facet-toggle"
             type="button"
             :aria-expanded="facetSectionOpen"
             aria-controls="facet-panel"
+            aria-label="年・組の絞り込み欄を開閉"
             @click="facetSectionOpen = !facetSectionOpen"
           >
-            年・組の絞り込み <span class="muted">({{ facetSelectionSummary }})</span>
+            年・組 <span class="muted">({{ facetSelectionSummary }})</span>
           </button>
+          <button
+            class="btn secondary remark-toggle"
+            type="button"
+            :aria-expanded="remarkSectionOpen"
+            aria-controls="remark-panel"
+            aria-label="備考の絞り込み欄を開閉"
+            @click="remarkSectionOpen = !remarkSectionOpen"
+          >
+            備考 <span class="muted">({{ remarkSelectionSummary }})</span>
+          </button>
+        </div>
 
-          <div id="facet-panel" v-show="facetSectionOpen" class="facet-panel">
-            <div class="mode-row" role="group" aria-label="年・組の絞り込み方法">
-              <button
-                class="btn secondary"
-                type="button"
-                :class="{ active: facetMode === 'single' }"
-                :aria-pressed="facetMode === 'single'"
-                @click="setMode('single')"
-              >
-                年・組を単独で
-              </button>
-              <button
-                class="btn secondary"
-                type="button"
-                :class="{ active: facetMode === 'pair' }"
-                :aria-pressed="facetMode === 'pair'"
-                @click="setMode('pair')"
-              >
-                年と組の組み合わせ
-              </button>
-            </div>
-
-            <template v-if="facetMode === 'single'">
-              <FacetChipGroup
-                label="年(複数選択でOR)"
-                suffix="年"
-                :options="facets?.years ?? []"
-                :selected="years"
-                :loading="!facets"
-                @toggle="toggleYear"
-              />
-              <FacetChipGroup
-                label="組(複数選択でOR)"
-                suffix="組"
-                :options="facets?.groups ?? []"
-                :selected="groups"
-                :loading="!facets"
-                @toggle="toggleGroup"
-              />
-              <p class="muted hint">
-                年と組はそれぞれ複数選択で OR、年と組の間は AND で絞り込みます(1年・2年 + 3組 は「1年3組 と 2年3組」)。
-                年と組の対応(1年3組 + 2年1組)は単独選択では指定できません。
-              </p>
-            </template>
-
-            <template v-else>
-              <YearGroupMatrix
-                :years="facets?.years ?? []"
-                :groups="facets?.groups ?? []"
-                :pair-counts="facets?.pairs ?? []"
-                :selected="pairs"
-                :loading="!facets"
-                @toggle="togglePair"
-              />
-              <p class="muted hint">
-                選んだマス(その年 + その組)だけを対象にします。マス同士は OR なので、1年3組 + 2年1組 のような対応を指定できます。
-                <span v-if="facets && facets.missingPairs">
-                  年または組が空のレコードは {{ facets.missingPairs }} 件あり、組み合わせでは選べません(条件なしなら表示されます)。
-                </span>
-              </p>
-            </template>
-
-            <p class="muted hint">
-              <span v-if="facetError">選択肢を取得できませんでした({{ facetError }})</span>
-              <span v-else-if="facets?.truncated">選択肢は先頭 {{ facets.scanned }} 件の範囲から生成しています</span>
-            </p>
+        <!-- 年・組の欄は縦に場所を取る(年9×組5)ので折りたたみできる。閉じても選択状態はラベルに出す -->
+        <div id="facet-panel" v-show="facetSectionOpen" class="facet-panel">
+          <div class="mode-row" role="group" aria-label="年・組の絞り込み方法">
+            <button
+              class="btn secondary"
+              type="button"
+              :class="{ active: facetMode === 'single' }"
+              :aria-pressed="facetMode === 'single'"
+              @click="setMode('single')"
+            >
+              年・組を単独で
+            </button>
+            <button
+              class="btn secondary"
+              type="button"
+              :class="{ active: facetMode === 'pair' }"
+              :aria-pressed="facetMode === 'pair'"
+              @click="setMode('pair')"
+            >
+              年と組の組み合わせ
+            </button>
           </div>
+
+          <template v-if="facetMode === 'single'">
+            <FacetChipGroup
+              label="年(複数選択でOR)"
+              suffix="年"
+              :options="facets?.years ?? []"
+              :selected="years"
+              :loading="!facets"
+              @toggle="toggleYear"
+            />
+            <FacetChipGroup
+              label="組(複数選択でOR)"
+              suffix="組"
+              :options="facets?.groups ?? []"
+              :selected="groups"
+              :loading="!facets"
+              @toggle="toggleGroup"
+            />
+            <p class="muted hint">
+              年と組はそれぞれ複数選択で OR、年と組の間は AND で絞り込みます(1年・2年 + 3組 は「1年3組 と 2年3組」)。
+              年と組の対応(1年3組 + 2年1組)は単独選択では指定できません。
+            </p>
+          </template>
+
+          <template v-else>
+            <YearGroupMatrix
+              :years="facets?.years ?? []"
+              :groups="facets?.groups ?? []"
+              :pair-counts="facets?.pairs ?? []"
+              :selected="pairs"
+              :loading="!facets"
+              @toggle="togglePair"
+            />
+            <p class="muted hint">
+              選んだマス(その年 + その組)だけを対象にします。マス同士は OR なので、1年3組 + 2年1組 のような対応を指定できます。
+              <span v-if="facets && facets.missingPairs">
+                年または組が空のレコードは {{ facets.missingPairs }} 件あり、組み合わせでは選べません(条件なしなら表示されます)。
+              </span>
+            </p>
+          </template>
+
+          <p class="muted hint">
+            <span v-if="facetError">選択肢を取得できませんでした({{ facetError }})</span>
+            <span v-else-if="facets?.truncated">選択肢は先頭 {{ facets.scanned }} 件の範囲から生成しています</span>
+          </p>
+        </div>
+
+        <!-- 備考の欄: 有無の3ボタン(1行に並ぶ) + 部分一致入力。閉じると状態はトグルのラベルに出る -->
+        <div id="remark-panel" v-show="remarkSectionOpen" class="remark-panel">
+          <div class="mode-row" role="group" aria-label="備考の有無">
+            <button
+              class="btn secondary"
+              type="button"
+              :class="{ active: remarkState === 'any' }"
+              :aria-pressed="remarkState === 'any'"
+              @click="setRemarkState('any')"
+            >
+              すべて
+            </button>
+            <button
+              class="btn secondary"
+              type="button"
+              :class="{ active: remarkState === 'present' }"
+              :aria-pressed="remarkState === 'present'"
+              @click="setRemarkState('present')"
+            >
+              あり
+            </button>
+            <button
+              class="btn secondary"
+              type="button"
+              :class="{ active: remarkState === 'absent' }"
+              :aria-pressed="remarkState === 'absent'"
+              @click="setRemarkState('absent')"
+            >
+              なし
+            </button>
+          </div>
+          <ClearableInput v-model="remarkInput" label="備考(部分一致)" placeholder="備考の一部を入力" />
+          <p class="muted hint">
+            「あり」は備考が入っている行、「なし」は備考が空(未記入・空文字)の行です。条件なしは「すべて」で、有無と文字検索は code・氏名・年・組との AND で絞ります。
+          </p>
         </div>
 
         <button class="btn secondary" type="button" :disabled="!hasFilters" @click="resetFilters">
@@ -579,7 +687,20 @@ await Promise.all(initialLoads)
   gap: 12px;
 }
 
+/* 折りたたみ欄のトグル(年・組 / 備考)。狭い画面では折り返すが、閉じた状態では1行のボタンだけ */
+.filter-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .facet-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.remark-panel {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -600,7 +721,8 @@ await Promise.all(initialLoads)
   box-shadow: inset 0 0 0 2px rgba(120, 190, 255, 0.8);
 }
 
-.facet-toggle {
+.facet-toggle,
+.remark-toggle {
   font-size: 14px;
   padding: 8px 12px;
 }

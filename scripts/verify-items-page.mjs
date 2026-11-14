@@ -6,6 +6,8 @@
  *   - 年・組の chip 絞り込み: 同一 facet は OR(件数の和)、年×組は AND(和より少ない)
  *   - 条件をリセット: 入力・年・組が一度に消え、無条件の総件数に戻る(条件なし時はボタン無効)
  *   - 入力の消去ボタン(clearable 相当): 値があるときだけ出て、押すと空になる
+ *   - 備考の絞り込み(折りたたみ欄): 閉じるとトグル1行だけ(条件領域は大きくならない)。
+ *     あり+なし = 全件(網羅・排他)、行を開くと備考の値が実際に入っている/空、備考の部分一致検索が効く
  *   - /scan の手入力欄が撤去されている( placeholder が存在しない)
  *   - 絞り込み状態の保持: 行タップで結果を開いて一覧に戻ると、条件・読み込み済みの行・
  *     スクロール位置がそのまま復活する(「一覧に戻る」とブラウザの戻るの両方)
@@ -544,6 +546,121 @@ out.push(
   `ブラウザの戻る → active=${backAgainChips.join(',')} / total=${await statusTotal()}(=${group3Again}) / スクロール=${backAgainScroll}(去る時 ${scrollBefore})`,
 )
 if (backAgainChips.length !== 1 || (await statusTotal()) !== group3Again || Math.abs(backAgainScroll - scrollBefore) > 4) ok = false
+
+// ---- 備考の絞り込み(折りたたみ欄: 有無の3ボタン + 部分一致入力) ----
+// status が「N 件中 M 件表示」に確定するまで待つ(検索中・読み込み中は判定できない)
+async function waitSettled() {
+  await page.waitForFunction(
+    () => /\d+ 件中 \d+ 件表示/.test(document.querySelector('.status')?.textContent ?? ''),
+    { timeout: 6000 },
+  )
+}
+// 照会結果画面の備考の値(インライン編集の「編集」ボタンは span の外なので値だけ読める)
+function remarkValueOnResult() {
+  return page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.result-row')]
+    const row = rows.find((el) => el.querySelector('dt')?.textContent.trim() === '備考')
+    return row?.querySelector('dd span')?.textContent.trim() ?? null
+  })
+}
+async function openFirstRowAndRemark() {
+  await page.locator('.item-row').first().locator('a').click()
+  await page.waitForFunction(() => location.pathname === '/result', { timeout: 5000 })
+  // 結果画面は fetch 後に詳細が出るので、備考の行が描画されてから読む(client 遷移では一瞬「読み込み中…」が出る)
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('.result-row')].some((el) => el.querySelector('dt')?.textContent.trim() === '備考'),
+    { timeout: 6000 },
+  )
+  const remark = await remarkValueOnResult()
+  await page.getByRole('link', { name: '一覧に戻る' }).click()
+  await page.waitForFunction(() => location.pathname === '/items', { timeout: 5000 })
+  await page.waitForTimeout(300)
+  return remark
+}
+
+await resetButton.click()
+await waitSettled()
+const totalAll = await statusTotal()
+
+// 条件領域の高さの基準は「年・組・備考とも畳んだ」状態で出す(前のテストで年・組の欄が開いたままなので閉める)
+if ((await facetToggle.getAttribute('aria-expanded')) === 'true') {
+  await facetToggle.click()
+  await page.waitForTimeout(200)
+}
+
+// 閉じた状態: 備考入力・有無ボタンは出ない(条件領域の増分はトグル欄の高さだけ)
+const remarkToggle = page.locator('.remark-toggle')
+const remarkClosed = await remarkToggle.getAttribute('aria-expanded')
+const remarkInputHidden = await page.getByPlaceholder('備考の一部を入力').isVisible()
+const togglesInOneRow = await page
+  .locator('.filter-toggles')
+  .evaluate((el) => [...el.querySelectorAll('button')].map((b) => b.className))
+const cardClosed = await page.locator('.card').first().evaluate((el) => Math.round(el.getBoundingClientRect().height))
+const togglesHeight = await page.locator('.filter-toggles').evaluate((el) => Math.round(el.getBoundingClientRect().height))
+out.push(
+  `備考欄(閉じた時): aria-expanded=${remarkClosed}(false が期待値) / 備考入力の表示=${remarkInputHidden}(false が期待値) / トグル2個が同じ欄に出る=${togglesInOneRow.length === 2} / 条件 card=${cardClosed}px(トグル欄=${togglesHeight}px, 1行に並ぶ=${togglesHeight < 60})`,
+)
+if (remarkClosed !== 'false' || remarkInputHidden) ok = false
+// compactness: 備考のトグルは年・組のトグルと同じ1行に収まる(閉じた状態の条件領域の縦を増やさない)
+if (togglesInOneRow.length !== 2 || togglesHeight >= 60) ok = false
+
+await remarkToggle.click()
+await page.waitForTimeout(200)
+if ((await remarkToggle.getAttribute('aria-expanded')) !== 'true') ok = false
+if (!(await page.getByPlaceholder('備考の一部を入力').isVisible())) ok = false
+const cardOpen = await page.locator('.card').first().evaluate((el) => Math.round(el.getBoundingClientRect().height))
+out.push(`備考欄を開いた時: card=${cardOpen}px(閉じた時 ${cardClosed}px より増える=${cardOpen > cardClosed}) / 開いても一覧の行は消えない=${(await rowCount()) > 0}`)
+if (cardOpen <= cardClosed) ok = false
+
+// 有無: 「あり」と「なし」の件数の和 = 全件(網羅かつ排他)。URL に状態が写る
+const presentButton = page.getByRole('button', { name: 'あり', exact: true })
+const absentButton = page.getByRole('button', { name: 'なし', exact: true })
+listRequests.length = 0
+await presentButton.click()
+await waitSettled()
+const totalPresent = await statusTotal()
+const remarkTextOnFirst = await openFirstRowAndRemark()
+listRequests.length = 0
+await absentButton.click()
+await waitSettled()
+const totalAbsent = await statusTotal()
+const remarkTextOnAbsent = await openFirstRowAndRemark()
+out.push(
+  `備考の有無 → あり=${totalPresent} / なし=${totalAbsent} / 和=${totalPresent + totalAbsent}(全件 ${totalAll} と一致)=${totalPresent + totalAbsent === totalAll} / ありの行の備考="${remarkTextOnFirst}"(空でない) / なしの行の備考="${remarkTextOnAbsent}"(空) / リクエスト=${listRequests.some((u) => u.includes('remarkState=absent'))}`,
+)
+if (totalPresent <= 0 || totalAbsent <= 0 || totalPresent + totalAbsent !== totalAll) ok = false
+if (!remarkTextOnFirst) ok = false
+if (remarkTextOnAbsent !== '') ok = false
+
+// 部分一致の文字検索(有無は「すべて」に戻して単独で効かせる)。トグルのラベルに検索語が出る
+await page.getByRole('button', { name: 'すべて', exact: true }).click()
+await waitSettled()
+if ((await statusTotal()) !== totalAll) ok = false
+listRequests.length = 0
+await page.getByPlaceholder('備考の一部を入力').pressSequentially('振込', { delay: 60 })
+await page.waitForFunction(
+  () => /\d+ 件中 \d+ 件表示/.test(document.querySelector('.status')?.textContent ?? ''),
+  { timeout: 6000 },
+)
+const totalRemark = await statusTotal()
+const remarkSearchLabel = await remarkToggle.textContent()
+const remarkOnSearchRow = await openFirstRowAndRemark()
+out.push(
+  `備考の文字検索(振込) → total=${totalRemark}(あり ${totalPresent} 以下)=${totalRemark <= totalPresent} / 先頭の行の備考="${remarkOnSearchRow?.slice(0, 40)}" / 検索語を含む=${!!remarkOnSearchRow && remarkOnSearchRow.includes('振込')} / リクエスト=${listRequests.some((u) => u.includes('remark='))} / トグルのラベル="${remarkSearchLabel?.trim()}"`,
+)
+if (totalRemark <= 0 || totalRemark > totalPresent || !remarkOnSearchRow?.includes('振込')) ok = false
+if (!remarkSearchLabel?.includes('振込')) ok = false
+
+// リセットで備考の有無と入力が一度に消える(条件なしならボタン無効)
+await resetButton.click()
+await waitSettled()
+const resetRemark = await page.inputValue('input[placeholder="備考の一部を入力"]')
+out.push(
+  `リセット後 → total=${await statusTotal()}(初期 ${totalAll}) / 備考入力="${resetRemark}" / すべて aria-pressed=${await page.getByRole('button', { name: 'すべて', exact: true }).getAttribute('aria-pressed')}(true が期待値) / リセットボタン disabled=${await resetButton.isDisabled()}(true が期待値)`,
+)
+if ((await statusTotal()) !== totalAll || resetRemark !== '') ok = false
+if ((await page.getByRole('button', { name: 'すべて', exact: true }).getAttribute('aria-pressed')) !== 'true') ok = false
+if (!(await resetButton.isDisabled())) ok = false
 
 out.push(`console warnings: ${warns.slice(0, 3).join(' | ') || '(none)'}`)
 console.log(out.join('\n'))

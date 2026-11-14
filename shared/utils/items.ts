@@ -28,6 +28,36 @@ export const ITEM_REMARK_KEY = '備考'
 export const REMARK_MAX_LENGTH = 2000
 
 /**
+ * 一覧の「備考の有無」絞り込みの状態。
+ *  - any     = 条件なし(既定。有無で絞らない)
+ *  - present = 備考が入っている行だけ
+ *  - absent  = 備考が空(キー無し・null・空文字)の行だけ
+ */
+export type RemarkState = 'any' | 'present' | 'absent'
+
+/**
+ * クエリパラメータの備考の有無を正規化する。認識しない値・非文字列は any(条件なし)。
+ * URL は `?remarkState=present` / `?remarkState=absent`(大文字・空白は吸収する)。
+ */
+export function normalizeRemarkState(raw: unknown): RemarkState {
+  if (typeof raw !== 'string') return 'any'
+  const value = raw.trim().toLowerCase()
+  if (value === 'present') return 'present'
+  if (value === 'absent') return 'absent'
+  return 'any'
+}
+
+/**
+ * 「備考なし」を PostgREST の論理木にする(supabase-js の `.or()` が `or=(...)` に包む)。
+ * 備考キーが無い行(null)と空文字の行の両方を「なし」に含める。
+ * 空白のみの備考は PostgREST で trim できないため「あり」側に残る(入力は trim するので通常起きない)。
+ */
+export function remarkAbsentConditions(key = ITEM_REMARK_KEY): string {
+  const column = payloadTextColumn(key)
+  return `${column}.is.null,${column}.eq.""`
+}
+
+/**
  * 個数系(payload の商品)キーの suffix。シート側のカラム名(「ひのドッグ(個数)」など)。
  * 全角括弧も扱う(シート表記の揺れ対策)。
  */
