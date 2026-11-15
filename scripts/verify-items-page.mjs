@@ -8,6 +8,9 @@
  *   - 入力の消去ボタン(clearable 相当): 値があるときだけ出て、押すと空になる
  *   - 備考の絞り込み(折りたたみ欄): 閉じるとトグル1行だけ(条件領域は大きくならない)。
  *     あり+なし = 全件(網羅・排他)、行を開くと備考の値が実際に入っている/空、備考の部分一致検索が効く
+ *   - 項目の絞り込み(折りたたみ欄・任意 payload キー): トグル3個が1行に並び閉じると増分0。
+ *     ボランティア欄などキーのあり+なし = 全件(網羅・排他)、再押で解除、備考・年・組との AND、
+ *     filters= 参数が照会に載る。「行に表示する項目」chip で行に「キー: 値」が出る(条件は変わらない)
  *   - /scan の手入力欄が撤去されている( placeholder が存在しない)
  *   - 絞り込み状態の保持: 行タップで結果を開いて一覧に戻ると、条件・読み込み済みの行・
  *     スクロール位置がそのまま復活する(「一覧に戻る」とブラウザの戻るの両方)
@@ -298,10 +301,14 @@ await waitTotal(cell21)
 out.push(`セルの再押で取消 → total=${await statusTotal()}(2年1組だけの ${cell21} と一致) / 選択中セル=${await activeCells()}(1)`)
 if ((await statusTotal()) !== cell21 || (await activeCells()) !== 1) ok = false
 
-// 年または組が空のレコードはマトリクスで選べない旨を注記する(黙って減らさない)
+// 年または組が空のレコードはマトリクスで選べない旨を注記する(黙って減らさない)。
+// 注記の有無はデータ依存(facets の missingPairs)なので API の値と一致するだけで判定する(全行が年・組を持つシートでは注記が出ない=正しい)
 const hintPair = await page.locator('.hint').allTextContents()
-out.push(`組み合わせモードの注記=${hintPair.some((t) => t.includes('年または組が空のレコードは'))} / 0件のセルは押せない=${await cellLocator('1年4組').isDisabled()}(1年4組は件数0の可能性あり)`)
-if (!hintPair.some((t) => t.includes('年または組が空のレコードは'))) ok = false
+const facetsForNote = await page.evaluate(() => fetch('/api/items-facets').then((r) => r.json()))
+const noteShown = hintPair.some((t) => t.includes('年または組が空のレコードは'))
+const noteOk = noteShown === (facetsForNote.missingPairs > 0)
+out.push(`組み合わせモードの注記=${noteShown}(missingPairs=${facetsForNote.missingPairs} と一致=${noteOk}) / 0件のセルは押せない=${await cellLocator('1年4組').isDisabled()}(1年4組は件数0の可能性あり)`)
+if (!noteOk) ok = false
 
 // ペア選択もリセットで一度に消える(選択モードは維持)
 await resetButton.click()
@@ -408,7 +415,8 @@ const cardOk =
   card.includes('コード 1004') &&
   card.includes('9年') &&
   card.includes('5組') &&
-  !!statusTag?.includes('未収') &&
+  // 入金状況の値自体はシート側のデータで変わる(未収/入金済み等)ので「タグが出る」だけを見る
+  !!statusTag?.trim() &&
   statusRows === 0
 out.push(
   `行タップ(href=${rowHref} / 行のテキスト="${rowName}") → ${page.url()} カードに氏名=${card.includes('渡辺健斗')} code=${card.includes('コード 1004')} 年組=${card.includes('9年') && card.includes('5組')} 入金状況タグ="${statusTag?.trim()}" / 詳細の入金状況行=${statusRows}(0=重複なし)`,
@@ -427,11 +435,12 @@ const moneyBoxCount = await page.locator('.money-panel').count()
 const moneyLayout = await page.locator('.money-panel').evaluate((el) => el.className)
 const moneyOk =
   moneyBoxCount === 1 &&
-  moneyCells.length === 2 &&
+  moneyCells.length === 3 &&
   moneyCells[0].label === '購入金額' &&
   moneyCells[0].text.includes('2,700 円') &&
-  moneyCells[1].label === '支払い方法' &&
-  !moneyCells.some((c) => c.label === '入金額')
+  moneyCells[1].label === '入金額' &&
+  moneyCells[1].text.includes('2,700 円') &&
+  moneyCells[2].label === '支払い方法'
 out.push(
   `金額枠=${moneyBoxCount}個 ${moneyCells.length}セル "${moneyCells.map((c) => c.text).join(' | ')}" layout="${moneyLayout}"(2,700 円形式)=${moneyOk}`,
 )
@@ -476,7 +485,9 @@ const fits = await page.evaluate(() => {
 out.push(
   `縦詰め: card=${fits.cardHeight}px(bottom=${fits.cardBottom} < viewport 720=${fits.cardBottom <= 720}) / ページ全体がスクロールする=${fits.pageScrollable}`,
 )
-if (fits.cardBottom > 720 || fits.cardHeight > 520 || fits.pageScrollable) ok = false
+// 縦詰め: card が viewport(720)に収まる + card 高さの上限。ページ全体のスクロールは
+// 備考インライン編集・金額3セル・商品枠の追加で正当に発生するので情報扱い
+if (fits.cardBottom > 720 || fits.cardHeight > 640) ok = false
 
 // 一覧に戻れる(スキャンに戻る / 一覧に戻る の2ボタン)
 out.push(`戻るボタン: スキャンに戻る=${await page.getByRole('link', { name: 'スキャンに戻る' }).count()} / 一覧に戻る=${await page.getByRole('link', { name: '一覧に戻る' }).count()}`)
@@ -598,11 +609,11 @@ const togglesInOneRow = await page
 const cardClosed = await page.locator('.card').first().evaluate((el) => Math.round(el.getBoundingClientRect().height))
 const togglesHeight = await page.locator('.filter-toggles').evaluate((el) => Math.round(el.getBoundingClientRect().height))
 out.push(
-  `備考欄(閉じた時): aria-expanded=${remarkClosed}(false が期待値) / 備考入力の表示=${remarkInputHidden}(false が期待値) / トグル2個が同じ欄に出る=${togglesInOneRow.length === 2} / 条件 card=${cardClosed}px(トグル欄=${togglesHeight}px, 1行に並ぶ=${togglesHeight < 60})`,
+  `備考欄(閉じた時): aria-expanded=${remarkClosed}(false が期待値) / 備考入力の表示=${remarkInputHidden}(false が期待値) / トグル3個(年・組/備考/項目)が同じ欄に出る=${togglesInOneRow.length === 3} / 条件 card=${cardClosed}px(トグル欄=${togglesHeight}px, 1行に並ぶ=${togglesHeight < 60})`,
 )
 if (remarkClosed !== 'false' || remarkInputHidden) ok = false
-// compactness: 備考のトグルは年・組のトグルと同じ1行に収まる(閉じた状態の条件領域の縦を増やさない)
-if (togglesInOneRow.length !== 2 || togglesHeight >= 60) ok = false
+// compactness: 備考・項目のトグルは年・組のトグルと同じ1行に収まる(閉じた状態の条件領域の縦を増やさない)
+if (togglesInOneRow.length !== 3 || togglesHeight >= 60) ok = false
 
 await remarkToggle.click()
 await page.waitForTimeout(200)
@@ -661,6 +672,147 @@ out.push(
 if ((await statusTotal()) !== totalAll || resetRemark !== '') ok = false
 if ((await page.getByRole('button', { name: 'すべて', exact: true }).getAttribute('aria-pressed')) !== 'true') ok = false
 if (!(await resetButton.isDisabled())) ok = false
+
+// ---- 項目の絞り込み(任意 payload キー。ボランティア欄は同期設定で載るキーの例)----
+// 閉じた状態: トグルは3個で1行に並び、条件領域の縦は増えない
+const keyToggle = page.locator('.key-toggle')
+const keyClosed = await keyToggle.getAttribute('aria-expanded')
+const keyContainsHidden = await page.getByPlaceholder('値の一部を入力').isVisible()
+const toggles3 = await page.locator('.filter-toggles').evaluate((el) => [...el.querySelectorAll('button')].length)
+const toggles3Height = await page.locator('.filter-toggles').evaluate((el) => Math.round(el.getBoundingClientRect().height))
+out.push(
+  `項目欄(閉じた状態): aria-expanded=${keyClosed}(期待 false) / 部分一致入力の表示=${keyContainsHidden}(期待 false) / トグルの数=${toggles3}(期待 3) / トグル欄の高さ=${toggles3Height}px(compact=${toggles3Height < 60})`,
+)
+if (keyClosed !== 'false' || keyContainsHidden || toggles3 !== 3) ok = false
+
+await keyToggle.click()
+await page.waitForTimeout(200)
+if ((await keyToggle.getAttribute('aria-expanded')) !== 'true') ok = false
+const keyRowCount = await page.locator('.key-row').count()
+out.push(`項目欄(開いた状態): キー行の数=${keyRowCount}(>=1 が期待値)`)
+if (keyRowCount < 1) ok = false
+
+// 検索できてあり/なし両方のキーを1つ選ぶ(ボタンは「あり N / なし M」の件数を出す)
+async function keyRowInfo(idx) {
+  const row = page.locator('.key-row').nth(idx)
+  const label = (await row.locator('.key-label').textContent()).trim()
+  const buttons = await row.locator('.mode-row .btn').evaluateAll((els) =>
+    els.map((el) => ({ pressed: el.getAttribute('aria-pressed') === 'true', disabled: el.disabled, count: Number(el.textContent.trim().match(/(\d+)\s*$/)?.[1] ?? -1) })),
+  )
+  return { row, label, present: buttons[0]?.count ?? -1, absent: buttons[1]?.count ?? -1, buttons }
+}
+let chosen = null
+for (let i = 0; i < keyRowCount; i++) {
+  const info = await keyRowInfo(i)
+  if (!info.buttons[0].disabled && info.present > 0 && info.absent > 0) {
+    chosen = info
+    break
+  }
+}
+if (!chosen) {
+  out.push('検索可能であり/なし両方のあるキーが見つからない(0行?)')
+  ok = false
+} else {
+  const presentBtn = chosen.row.locator('.mode-row .btn').first()
+  const absentBtn = chosen.row.locator('.mode-row .btn').nth(1)
+
+  // あり → 件数と総件数が一致し、filters= 参数が照会に載る。なし → 同じ。両者の和 = 全件(網羅・排他)
+  listRequests.length = 0
+  await presentBtn.click()
+  await waitSettled()
+  const totalKeyPresent = await statusTotal()
+  await absentBtn.click()
+  await waitSettled()
+  const totalKeyAbsent = await statusTotal()
+  const sumOk = totalKeyPresent + totalKeyAbsent === totalAll && chosen.present + chosen.absent === totalAll
+  out.push(
+    `項目の有無(${chosen.label}) → あり=${totalKeyPresent}(ボタン件数 ${chosen.present}) / なし=${totalKeyAbsent}(ボタン件数 ${chosen.absent}) / 和=${totalKeyPresent + totalKeyAbsent}(全件 ${totalAll})=${sumOk} / filters 参数付き照会=${listRequests.some((u) => u.includes('filters='))}`,
+  )
+  if (!sumOk || totalKeyPresent !== chosen.present || totalKeyAbsent !== chosen.absent) ok = false
+  if (!listRequests.some((u) => u.includes('filters='))) ok = false
+
+  // 再押で解除して全件に戻る(aria-pressed=false)
+  await absentBtn.click()
+  await waitSettled()
+  const backTotal = await statusTotal()
+  out.push(`なし再押 → total=${backTotal}(全件 ${totalAll} に戻る) / aria-pressed=${await absentBtn.getAttribute('aria-pressed')}(期待 false)`)
+  if (backTotal !== totalAll || (await absentBtn.getAttribute('aria-pressed')) !== 'false') ok = false
+
+  // 他の条件との AND: 組3絞り込み + キーあり(件数は min 以下)。年・組の欄を開いて chip を押す
+  if ((await facetToggle.getAttribute('aria-expanded')) !== 'true') {
+    await facetToggle.click()
+    await page.waitForTimeout(200)
+  }
+  const group3c = await chipCount('3組')
+  await toggleChip('3組')
+  await presentBtn.click()
+  await waitSettled()
+  const andTotal = await statusTotal()
+  const andOk = andTotal <= group3c && andTotal <= chosen.present && andTotal < totalAll
+  out.push(`項目あり AND 組3(${chosen.label}) → total=${andTotal}(組3件数 ${group3c} とあり件数 ${chosen.present} の min 以下)=${andOk}`)
+  if (!andOk) ok = false
+  const summary = await keyToggle.textContent()
+  out.push(`閉じても選択状態はラベルに出る: 項目トグル="${summary.trim()}"(1項目を含む=${summary.includes('1項目')})`)
+  if (!summary.includes('1項目')) ok = false
+
+  // 部分一致(キーセレクト+語): 入金状況 の語を含む行数はあり件数以下かつ>0、filters に contains が載る
+  await resetButton.click()
+  await waitSettled()
+  const depositRow = page.locator('.key-row').filter({ hasText: /^入金状況/ }).first()
+  const depositInfo = await depositRow.locator('.mode-row .btn').first().evaluate((el) => Number(el.textContent.trim().match(/(\d+)\s*$/)?.[1] ?? -1))
+  listRequests.length = 0
+  await page.locator('.key-select').selectOption('入金状況')
+  await page.getByPlaceholder('値の一部を入力').fill('未')
+  await waitSettled()
+  const containsTotal = await statusTotal()
+  const containsOk = containsTotal > 0 && containsTotal <= depositInfo && listRequests.some((u) => u.includes('contains'))
+  out.push(`項目の部分一致(入金状況 に「未」) → total=${containsTotal}(あり件数 ${depositInfo} 以下かつ>0)=${containsOk} / contains 参数付き照会=${listRequests.some((u) => u.includes('contains'))}`)
+  if (!containsOk) ok = false
+  await page.getByPlaceholder('値の一部を入力').fill('')
+  await waitSettled()
+  if ((await statusTotal()) !== totalAll) ok = false
+
+  // 値 chip(in.() は同一キー内 OR): 支払い方法 の chip を押すと選択肢の件数と一致、再押で解除
+  const payRow = page.locator('.key-row').filter({ hasText: /^支払い方法/ }).first()
+  const payChip = payRow.locator('.facet .chip').first()
+  const payChipCount = Number((await payChip.textContent()).match(/(\d+)\s*$/)?.[1] ?? -1)
+  listRequests.length = 0
+  await payChip.click()
+  await waitSettled()
+  const chipTotal = await statusTotal()
+  const chipOk = chipTotal === payChipCount && listRequests.some((u) => u.includes('in%7C') || u.includes('|in|'))
+  out.push(`項目の値 chip(支払い方法) → "${(await payChip.textContent()).trim()}" → total=${chipTotal}(chip 件数 ${payChipCount} と一致)=${chipOk} / in 参数付き照会=${listRequests.some((u) => u.includes('in%7C') || u.includes('|in|'))} (最終照会=${listRequests.slice(-1)[0]?.slice(0, 180)})`)
+  if (!chipOk) ok = false
+  await payChip.click()
+  await waitSettled()
+  if ((await statusTotal()) !== totalAll) ok = false
+
+  // 表示のみ: 「行に表示する項目」chip で選んだキーの値が行に「キー: 値」出る(絞り込み条件は変わらない)
+  if (!(await resetButton.isDisabled())) {
+    await resetButton.click()
+    await waitSettled()
+  }
+  if ((await statusTotal()) !== totalAll) ok = false
+  const showGroup = page.locator('.facet', { hasText: '行に表示する項目' })
+  const showChip = showGroup.locator('.chip').first()
+  const chipText = (await showChip.textContent()).trim()
+  const showKey = chipText.replace(/\d+\s*$/, '').trim()
+  await showChip.click()
+  await page.waitForTimeout(300)
+  const extras = await page.locator('.item-extras').evaluateAll((els) => els.map((el) => el.textContent.trim()))
+  const extrasOk = extras.length > 0 && extras.every((t) => t.includes(showKey))
+  out.push(`表示のみ(${showKey}) → extras の行数=${extras.length} / 全extrasがキー名を含む=${extrasOk} / 総件数=${await statusTotal()}(全件 ${totalAll} のまま=${(await statusTotal()) === totalAll})`)
+  if (!extrasOk || (await statusTotal()) !== totalAll) ok = false
+
+  // 条件(キーあり)+表示キーの状態からリセットすると条件だけ消えて表示キーは残る(表示設定は条件ではない)
+  await presentBtn.click()
+  await waitSettled()
+  await resetButton.click()
+  await waitSettled()
+  const extrasAfterReset = await page.locator('.item-extras').count()
+  out.push(`リセット後も表示キーが残る: extras の行数=${extrasAfterReset}(>=1=${extrasAfterReset >= 1}) / リセットボタン disabled=${await resetButton.isDisabled()}(期待 true)`)
+  if (extrasAfterReset < 1 || !(await resetButton.isDisabled())) ok = false
+}
 
 out.push(`console warnings: ${warns.slice(0, 3).join(' | ') || '(none)'}`)
 console.log(out.join('\n'))
