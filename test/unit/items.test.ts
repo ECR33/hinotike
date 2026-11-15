@@ -4,6 +4,7 @@ import {
   containsPattern,
   compareFacetValues,
   escapeIlikePattern,
+  escapePayloadKey,
   facetCounts,
   FACET_MAX_VALUES,
   FACET_VALUE_MAX_LENGTH,
@@ -12,17 +13,25 @@ import {
   ITEM_GROUP_KEY,
   ITEM_PAIR_MAX,
   ITEM_YEAR_KEY,
+  isFilterableKey,
+  keyAbsentConditions,
+  KEY_FILTER_MAX,
+  KEY_NAME_MAX_LENGTH,
   nextCursor,
   normalizeFilter,
+  normalizeKeyFilters,
   normalizePairs,
   normalizeRemarkState,
   normalizeSelection,
   pairConditions,
   pairKey,
+  parseKeyFilter,
   parsePair,
   payloadTextColumn,
   payloadValue,
   productOrderKeys,
+  sameKeyFilters,
+  serializeKeyFilters,
   quantityName,
   isQuantityKey,
   facetPairCounts,
@@ -325,5 +334,149 @@ describe('productOrderKeys / quantityName / isQuantityKey(商品欄の表示順)
 
   it('空の includeColumns は順未指定(空配列。呼ぶ側がフォールバックの並びを使う)', () => {
     expect(productOrderKeys([], {})).toEqual([])
+  })
+})
+
+describe('escapePayloadKey / payloadTextColumn(キー名に " が混ざってもパスを守る)', () => {
+  it('キー内の " は二重にして引用の終端にしない', () => {
+    expect(escapePayloadKey('a"b')).toBe('a""b')
+    expect(payloadTextColumn('a"b')).toBe('payload->>"a""b"')
+    // 通常のキー名は変化しない(既存の照会式と同じ形)
+    expect(payloadTextColumn('氏名')).toBe('payload->>"氏名"')
+  })
+})
+
+describe('keyAbsentConditions(任意キーの「なし」論理木)', () => {
+  it('任意のキー名で欠落(null)と空文字の両方を包含する', () => {
+    expect(keyAbsentConditions('ボランティア')).toBe(
+      'payload->>"ボランティア".is.null,payload->>"ボランティア".eq.""',
+    )
+  })
+
+  it('remarkAbsentConditions はキー既定版(備考キー指定と同じ論理木)', () => {
+    expect(remarkAbsentConditions()).toBe(keyAbsentConditions('備考'))
+  })
+})
+
+describe('parseKeyFilter(汎用キー絞り込み spec のパース)', () => {
+  it('有無は値不要。キー・モードの空白と大文字は吸収する', () => {
+    expect(parseKeyFilter('ボランティア|present')).toEqual({ key: 'ボランティア', mode: 'present', value: '', values: [] })
+    expect(parseKeyFilter(' ボランティア | ABSENT ')).toEqual({ key: 'ボランティア', mode: 'absent', value: '', values: [] })
+    // 有無に値が付いても無視する(条件は有無だけ)
+    expect(parseKeyFilter('備考|present|x')).toEqual({ key: '備考', mode: 'present', value: '', values: [] })
+  })
+
+  it('contains は残り部分を値として読む(| が混ざっても再結合してそのまま一致対象)', () => {
+    expect(parseKeyFilter('入金状況|contains|%50|円%')).toEqual({
+      key: '入金状況',
+      mode: 'contains',
+      value: '%50|円%',
+      values: [],
+    })
+    expect(parseKeyFilter('入金状況|contains|')).toBeNull() // 空値は条件なし
+    expect(parseKeyFilter('入金状況|contains|   ')).toBeNull() // 空白のみも条件なし
+  })
+
+  it('in は | 区切りの値選択(同一キー内 OR。重複・空は normalizeSelection と同じ)', () => {
+    expect(parseKeyFilter('支払い方法|in|振り込み|現金')).toEqual({
+      key: '支払い方法',
+      mode: 'in',
+      value: '',
+      values: ['振り込み', '現金'],
+    })
+    expect(parseKeyFilter('支払い方法|in|現金|現金')).toEqual({
+      key: '支払い方法',
+      mode: 'in',
+      value: '',
+      values: ['現金'],
+    })
+    expect(parseKeyFilter('支払い方法|in|')).toBeNull()
+  })
+
+  it('認識できないモード・区切り無し・空キー・非文字列は null(条件にしない)', () => {
+    expect(parseKeyFilter('ボランティア')).toBeNull()
+    expect(parseKeyFilter('ボランティア|yes')).toBeNull()
+    expect(parseKeyFilter('|present')).toBeNull()
+    expect(parseKeyFilter(undefined)).toBeNull()
+    expect(parseKeyFilter(123)).toBeNull()
+  })
+
+  it('長さ上限超過のキーは条件にしない(切り捨てると別の実キーのprefixに化ける)', () => {
+    expect(parseKeyFilter(`${'a'.repeat(KEY_NAME_MAX_LENGTH + 5)}|present`)).toBeNull()
+  })
+
+  it('キー名に " が混ざるキーは条件にしない(表示のみ。PostgREST/supabase-js の照会が安全に組めない)', () => {
+    expect(parseKeyFilter('特"殊キー|present')).toBeNull()
+    expect(parseKeyFilter('特"殊キー|contains|x')).toBeNull()
+  })
+})
+
+describe('isFilterableKey(検索できるキーの判定)', () => {
+  it('通常のキーは true。" 含む・長さ上限超過・空は false(表示のみ)', () => {
+    expect(isFilterableKey('ボランティア')).toBe(true)
+    expect(isFilterableKey('ひのドッグ(個数)')).toBe(true)
+    expect(isFilterableKey('特"殊キー')).toBe(false)
+    expect(isFilterableKey('')).toBe(false)
+    expect(isFilterableKey('a'.repeat(KEY_NAME_MAX_LENGTH))).toBe(true)
+    expect(isFilterableKey('a'.repeat(KEY_NAME_MAX_LENGTH + 1))).toBe(false)
+  })
+})
+
+describe('normalizeKeyFilters(参数の受け取り・重複除き・上限)', () => {
+  it('配列は各要素を spec そのまま、文字列はカンマ区切りで分割する', () => {
+    expect(normalizeKeyFilters(['ボランティア|present', '支払い方法|in|現金'])).toEqual([
+      { key: 'ボランティア', mode: 'present', value: '', values: [] },
+      { key: '支払い方法', mode: 'in', value: '', values: ['現金'] },
+    ])
+    expect(normalizeKeyFilters('ボランティア|absent,備考|contains|振込')).toEqual([
+      { key: 'ボランティア', mode: 'absent', value: '', values: [] },
+      { key: '備考', mode: 'contains', value: '振込', values: [] },
+    ])
+  })
+
+  it('同一キー同一モードの重複は最初のみ。異モードの同時指定は残す(AND で交わる)', () => {
+    expect(normalizeKeyFilters(['備考|contains|a', '備考|contains|b'])).toEqual([
+      { key: '備考', mode: 'contains', value: 'a', values: [] },
+    ])
+    expect(normalizeKeyFilters(['備考|contains|a', '備考|present'])).toHaveLength(2)
+  })
+
+  it('壊れた要素は捨てて残りの条件を使う(配列要素の contains 値の , は壊れない)', () => {
+    expect(normalizeKeyFilters(['junk', '入金状況|contains|50,000円'])).toEqual([
+      { key: '入金状況', mode: 'contains', value: '50,000円', values: [] },
+    ])
+    expect(normalizeKeyFilters(undefined)).toEqual([])
+    expect(normalizeKeyFilters('bad')).toEqual([])
+    expect(normalizeKeyFilters([123])).toEqual([])
+  })
+
+  it('条件数の上限(KEY_FILTER_MAX)で切る(論理木の膨張を防ぐ)', () => {
+    const specs = Array.from({ length: KEY_FILTER_MAX + 3 }, (_, i) => `キー${i}|present`)
+    expect(normalizeKeyFilters(specs)).toHaveLength(KEY_FILTER_MAX)
+  })
+})
+
+describe('serializeKeyFilters / sameKeyFilters(URL 参数・条件比較)', () => {
+  it('spec 文字列に戻す(in の値は | 区切り、contains の値はそのまま)', () => {
+    expect(
+      serializeKeyFilters([
+        { key: 'ボランティア', mode: 'absent', value: '', values: [] },
+        { key: '備考', mode: 'contains', value: '振込', values: [] },
+        { key: '支払い方法', mode: 'in', value: '', values: ['現金', '振り込み'] },
+      ]),
+    ).toEqual(['ボランティア|absent', '備考|contains|振込', '支払い方法|in|現金|振り込み'])
+  })
+
+  it('round trip: serialize → normalize で同じ条件になる', () => {
+    const filters = normalizeKeyFilters(['ボランティア|present', '入金状況|contains|100%'])
+    expect(normalizeKeyFilters(serializeKeyFilters(filters))).toEqual(filters)
+  })
+
+  it('sameKeyFilters は順序無視の集合比較(条件の送信順を変えても同じ条件)', () => {
+    const a = normalizeKeyFilters(['ボランティア|present', '備考|contains|振込'])
+    const b = normalizeKeyFilters(['備考|contains|振込', 'ボランティア|present'])
+    expect(sameKeyFilters(a, b)).toBe(true)
+    expect(sameKeyFilters(a, normalizeKeyFilters(['ボランティア|absent']))).toBe(false)
+    expect(sameKeyFilters([], [])).toBe(true)
   })
 })

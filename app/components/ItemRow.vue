@@ -2,13 +2,15 @@
 /**
  * items 一覧の行部品(app/pages/items.vue から item をそのまま受け取る)。
  *
- * 行の中身はここだけで決める: 現在は 年 / 組 / 氏名 / code の4要素だけ。
+ * 行の中身はここだけで決める: 現在は 年 / 組 / 氏名 / code の4要素 + extraKeys で選ばれたキーの値。
  * 支払い状況・領収書などの列を増やしたいときは payloadValue でキーを足すだけで
  * ページ側は変更不要(API は payload をそのまま返している)。
+ * extraKeys(画面の「行に表示する項目」で選った payload キー)の値は氏名・年・組と同一キーなら重複せず
+ * 空の値は出さない(表示のみで絞り込み条件には影響しない)。
  *
  * 行全体が /result?code=… のリンク(スキャンしたときと同じ照会結果画面へ遷移する)。
  * 行の中は span だけにして入れ子のリンクを作らないので、行まるごとタップで遷移できる。
- * アクセシブル名は行テキストそのもの(氏名 + 年組 + code)になる。
+ * アクセシブル名は行テキストそのもの(氏名 + 年組 + 表示キーの値 + code)になる。
  */
 import {
   ITEM_GROUP_KEY,
@@ -18,12 +20,25 @@ import {
   type ItemRowData,
 } from '#shared/utils/items'
 
-const props = defineProps<{ item: ItemRowData }>()
+const props = defineProps<{
+  item: ItemRowData
+  /** 行に追加表示する payload キー(表示のみ。空の値は出さない)。 */
+  extraKeys?: string[]
+}>()
 
 const name = computed(() => payloadValue(props.item.payload, ITEM_NAME_KEY))
 const year = computed(() => payloadValue(props.item.payload, ITEM_YEAR_KEY))
 const group = computed(() => payloadValue(props.item.payload, ITEM_GROUP_KEY))
 const detailHref = computed(() => `/result?code=${encodeURIComponent(props.item.code)}`)
+
+/** extraKeys の値(欠落・空は出さない)。専用欄のあるキー(年・組・氏名)は行の既存要素と重複させない。 */
+const extras = computed(() => {
+  const dedicated = new Set([ITEM_YEAR_KEY, ITEM_GROUP_KEY, ITEM_NAME_KEY])
+  return (props.extraKeys ?? [])
+    .filter((key) => !dedicated.has(key))
+    .map((key) => ({ key, value: payloadValue(props.item.payload, key) }))
+    .filter((extra) => extra.value !== '')
+})
 </script>
 
 <template>
@@ -34,6 +49,9 @@ const detailHref = computed(() => `/result?code=${encodeURIComponent(props.item.
         <span class="item-meta">
           <span v-if="year">{{ year }}年</span>
           <span v-if="group">{{ group }}組</span>
+        </span>
+        <span v-if="extras.length" class="item-extras">
+          <span v-for="extra in extras" :key="extra.key">{{ extra.key }}: {{ extra.value }}</span>
         </span>
       </span>
       <span class="item-code">{{ item.code }}</span>
@@ -87,6 +105,15 @@ const detailHref = computed(() => `/result?code=${encodeURIComponent(props.item.
   gap: 8px;
   color: var(--muted);
   font-size: 13px;
+}
+
+/* 表示のみで追加したキーの値(「キー: 値」の小さな行。長い値は折り返す) */
+.item-extras {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .item-code {

@@ -48,13 +48,151 @@ export function normalizeRemarkState(raw: unknown): RemarkState {
 }
 
 /**
- * 「備考なし」を PostgREST の論理木にする(supabase-js の `.or()` が `or=(...)` に包む)。
- * 備考キーが無い行(null)と空文字の行の両方を「なし」に含める。
- * 空白のみの備考は PostgREST で trim できないため「あり」側に残る(入力は trim するので通常起きない)。
+ * 「任意の payload キーがなし」を PostgREST の論理木にする(supabase-js の `.or()` が `or=(...)` に包む)。
+ * キーが無い行(null)と空文字の行の両方を「なし」に含める。
+ * 空白のみの値は PostgREST で trim できないため「あり」側に残る(同期は空値を載せず、備考の保存は trim するので通常起きない)。
  */
-export function remarkAbsentConditions(key = ITEM_REMARK_KEY): string {
+export function keyAbsentConditions(key: string): string {
   const column = payloadTextColumn(key)
   return `${column}.is.null,${column}.eq.""`
+}
+
+/** 備考の「なし」条件(keyAbsentConditions の備考キー既定版)。 */
+export function remarkAbsentConditions(key = ITEM_REMARK_KEY): string {
+  return keyAbsentConditions(key)
+}
+
+/**
+ * 汎用の項目(payload キー)絞り込み。
+ *
+ * 備考と同じ照会(`payload->>"キー"`)を任意キーに流用する:
+ *  - present = 値が入っている行(not.is.null + neq "")
+ *  - absent  = 欠落・null・空文字の行(keyAbsentConditions → 別の `or=`。複数の `or=` は AND で結合されるので
+ *    pairs の OR や他の absent 条件と同時に使える)
+ *  - contains = そのキーの部分一致(ilike, containsPattern で % _ をリテラル化)
+ *  - in       = 値の複数選択(同一キー内 OR。items-facets と同じ `in.()` + quoteInValue)
+ * キー同士・備考・code・氏名・年・組との指定はすべて AND。
+ * キー名は同期設定(includeColumns + rename)やシートヘッダー由来の任意文字列なので、
+ * 静的定数ではなく API/画面が実際に発見したキーから選ぶ(有無の絞り込みは同期前にunknownキーでも送れる)。
+ */
+export type KeyFilterMode = 'present' | 'absent' | 'contains' | 'in'
+
+/** 汎用キー絞り込みの1条件。contains は value、in は values を使う(present/absent ではどちらも未使用)。 */
+export interface KeyFilter {
+  key: string
+  mode: KeyFilterMode
+  value: string
+  values: string[]
+}
+
+/** キー絞り込み条件数の上限(論理木の膨張による高コスト照合を防ぐ。facet/pair の上限と同じ発想)。 */
+export const KEY_FILTER_MAX = 8
+
+/** 絞り込みキー名の長さ上限(長すぎるキーは条件にしない。シートヘッダー名は現実にはこの範囲内)。 */
+export const KEY_NAME_MAX_LENGTH = 40
+
+/**
+ * payload キー名が絞り込み条件に使えるか。
+ * キー名に `"` が混ざると PostgREST/supabase-js の絞り込みが安全に組めない(統合テストで実挙動を固定:
+ * `.or()` は論理木パースエラー、パス照会は暗黙に 0 件になる)。シートヘッダー由来の任意キー名で
+ * `"` を含むキーは**表示のみ**に制限する(GET /api/items-keys はそのまま返すので表示側は使える)。
+ * 長さ上限(KEY_NAME_MAX_LENGTH)を超えるキーも条件にしない(parseKeyFilter と同じ規則)。
+ */
+export function isFilterableKey(key: string): boolean {
+  return !!key && !key.includes('"') && key.length <= KEY_NAME_MAX_LENGTH
+}
+
+/**
+ * 絞り込み spec 文字列 `キー|モード|値` を KeyFilter にパースする。
+ * キー・モードは trim(モードは大文字吸収)。値部分は残りの `|` を再結合して読むため
+ * contains 値に `|` が混ざってもそのまま一致対象になる。
+ * present/absent は値不要。contains の空値・in の値なしは「条件なし」扱いで null。
+ * 認識できないモード・空キー・非文字列も null(条件にしない)。
+ * 絞り込みできないキー(isFilterableKey=false、`"` 含む等)も null。
+ */
+export function parseKeyFilter(raw: unknown): KeyFilter | null {
+  if (typeof raw !== 'string') return null
+  const [keyPart = '', modePart = '', ...restParts] = raw.split('|')
+  if (!raw.includes('|')) return null // 区切りが無い spec は条件にしない
+  const key = keyPart.trim()
+  // 長さ超過のキーは切り捨てずに条件にしない(切り捨てると別の実キーのprefixに化けて別物を絞る)
+  if (!key || !isFilterableKey(key)) return null
+  const mode = modePart.trim().toLowerCase()
+  const rest = restParts.join('|')
+  if (mode === 'present' || mode === 'absent') return { key, mode, value: '', values: [] }
+  if (mode === 'contains') {
+    const value = normalizeFilter(rest)
+    if (!value) return null
+    return { key, mode, value, values: [] }
+  }
+  if (mode === 'in') {
+    const values = normalizeSelection(rest.split('|'))
+    if (!values.length) return null
+    return { key, mode, value: '', values }
+  }
+  return null
+}
+
+/**
+ * クエリパラメータのキー絞り込みを正規化する。配列は各要素を spec としてそのまま受け取り、
+ * 文字列はカンマ区切りで spec を分割する(URL の単一参数形式では contains/in 値に `,` を載せられない。
+ * 画面は配列で送るため値に `,` が混ざっても壊れない)。
+ * 同一キー同一モードの重複は最初のみ(同一キーの present+absent など異モードは AND のまま許す。0件になる)。
+ * 上限は KEY_FILTER_MAX。
+ */
+export function normalizeKeyFilters(raw: unknown): KeyFilter[] {
+  const items = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(',') : []
+  const seen = new Set<string>()
+  const out: KeyFilter[] = []
+  for (const item of items) {
+    const filter = parseKeyFilter(item)
+    if (!filter) continue
+    const dedupe = `${filter.key}|${filter.mode}`
+    if (seen.has(dedupe)) continue
+    seen.add(dedupe)
+    out.push(filter)
+    if (out.length >= KEY_FILTER_MAX) break
+  }
+  return out
+}
+
+/** KeyFilter を spec 文字列(`キー|モード|値`)に戻す(URL 参数・条件比較用)。 */
+export function serializeKeyFilters(filters: KeyFilter[]): string[] {
+  return filters.map((filter) => {
+    if (filter.mode === 'contains') return `${filter.key}|contains|${filter.value}`
+    if (filter.mode === 'in') return `${filter.key}|in|${filter.values.join('|')}`
+    return `${filter.key}|${filter.mode}`
+  })
+}
+
+/** 条件比較用のキー絞り込み一致判定(順序は無視して集合として同じか。AND の条件順は結果に影響しない)。 */
+export function sameKeyFilters(a: KeyFilter[], b: KeyFilter[]): boolean {
+  const sa = serializeKeyFilters(a).sort()
+  const sb = serializeKeyFilters(b).sort()
+  if (sa.length !== sb.length) return false
+  return sa.every((spec, i) => spec === sb[i])
+}
+
+/**
+ * GET /api/items-keys の1項目ぶん(key 発見 + 有無の件数 + 値の選択肢)。
+ * absentCount = スキャン行数 - presentCount(欠落・null・空文字を「なし」とする)。
+ * fromConfig = 同期設定(includeColumns/rename)由来の候補、seenInData = スキャンした行に実際に出現。
+ * 設定由来でまだ出現していないキー(同期待ち)は presentCount=0 / seenInData=false で出る。
+ */
+export interface ItemKeyEntry {
+  key: string
+  presentCount: number
+  absentCount: number
+  options: FacetOption[]
+  fromConfig: boolean
+  seenInData: boolean
+}
+
+/** GET /api/items-keys の応答。scanned / truncated は payload のスキャン範囲(items-facets と同じ上限)。 */
+export interface ItemsKeysResponse {
+  keys: ItemKeyEntry[]
+  scanned: number
+  truncated: boolean
 }
 
 /**
@@ -96,9 +234,16 @@ export function productOrderKeys(includeColumns: string[], rename: Record<string
 /**
  * jsonb の文字列値をカラムとして参照する PostgREST のパス表記(payload ->> key)。
  * キーに空白や非ASCIIが混ざっても通るように引用符で囲む。
+ * キー名自体の `"` は SQL の引用規則通り2個重ねて守る(汎用キー絞り込みでは任意文字列のキー名を
+ * シートヘッダー由来で受け取るため、`"` を含むキーでパスが壊れないようにする)。
  */
 export function payloadTextColumn(key: string): string {
-  return `payload->>"${key}"`
+  return `payload->>"${escapePayloadKey(key)}"`
+}
+
+/** payload キー名の引用内エスケープ(`"` → `""`)。payloadTextColumn のパス組み立てで使う。 */
+export function escapePayloadKey(key: string): string {
+  return key.replace(/"/g, '""')
 }
 
 /** payload のキーから表示用の文字列値を取り出す(欠落・null は空文字)。 */

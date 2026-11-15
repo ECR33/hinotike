@@ -33,17 +33,43 @@
  *  - 文字列: 備考の部分一致入力(code・氏名と同じデバウンスで絞る)。
  * 欄は閉じると1つのボタン行だけなので、条件領域は普段は大きくならない(閉じていても
  *  選択状態はトグルのラベルに出す)。有無ボタンは即適用、入力はデバウンス。
+ *
+ * 項目の絞り込み(折りたたみできる1つの欄)は**任意の payload キー**の条件(GET /api/items-keys が
+ * 同期設定の候補キー + 実データスキャンで発見したキーを有無の件数・選択肢付きで返す)。
+ * 備考欄と同じ有無のボタン(あり/なし、即適用)をキーごとに並び、選択肢が少ないキーは
+ * chip で値の複数選択(同一キー内 OR)、部分一致は「項目の部分一致」のキーセレクト+入力で絞る。
+ * 年・組・氏名・備考は専用の欄があるのでここには並べない(同じキーの二重コントロールを作らない)。
+ * 設定に載る予定だがまだ出現していないキー(ボランティア欄の同期待ちなど)は件数0で注記付き出して消さない。
+ * キー同士・他の条件はすべて AND。条件は URL `?filters=キー|モード|値`(配列 or カンマ区切り)から初期化する。
+ * `"` を含むキー・長さ上限超過のキーは検索不可(isFilterableKey=false。PostgREST の照会が安全に組めないため。
+ * test/supabase/items-key-filter.test.ts で実挙動を固定)→ ボタン・chip・セレクトを disabled にして表示のみ扱う。
+ *
+ * 表示のみ(絞り込まない)もキーから選べる: 「行に表示する項目」の chip で選んだキーの値が
+ * 一覧行(ItemRow の extra-keys)に追加される(payload は API がそのまま返すのでサーバー変更不要。
+ * localStorage に保存して再訪問でも残る。リセットでは消さない=表示設定は絞り込み条件ではない)。
  */
 import {
+  ITEM_GROUP_KEY,
+  ITEM_NAME_KEY,
   ITEM_PAGE_SIZE,
+  ITEM_REMARK_KEY,
+  ITEM_YEAR_KEY,
+  isFilterableKey,
   normalizeFilter,
+  normalizeKeyFilters,
   normalizePairs,
   normalizeRemarkState,
   normalizeSelection,
   pairKey,
+  sameKeyFilters,
+  serializeKeyFilters,
+  quantityName,
   type FacetOption,
   type FacetPairCount,
   type ItemRowData,
+  type ItemKeyEntry,
+  type ItemsKeysResponse,
+  type KeyFilter,
   type RemarkState,
 } from '#shared/utils/items'
 
@@ -87,6 +113,14 @@ const initialMode: FacetMode = initialPairs.length ? 'pair' : 'single'
 /** 備考の部分一致入力と有無(URL の `?remark=` / `?remarkState=present|absent` だけ読む)。 */
 const initialRemark = normalizeFilter(route.query.remark) ?? ''
 const initialRemarkState = normalizeRemarkState(route.query.remarkState)
+/** 任意項目の絞り込み(URL の `?filters=キー|モード|値` 配列 or カンマ区切りだけ読む)。 */
+const initialKeyFilters = normalizeKeyFilters(route.query.filters)
+/** 初期のキー別状態を filters から分解する(画面の操作はキー別、条件の送信は KeyFilter 一覧)。 */
+const initialKeyPresence: Record<string, 'any' | 'present' | 'absent'> = {}
+const initialKeySelections: Record<string, string[]> = {}
+const initialContains = initialKeyFilters.find((f) => f.mode === 'contains') ?? null
+/** 行に表示するキー(URL の `?showKeys=`。客户端では localStorage の保存をマウント後に復元する)。 */
+const initialShowKeys = normalizeSelection(route.query.showKeys)
 
 const codeInput = ref(initialCode)
 const nameInput = ref(initialName)
@@ -99,11 +133,22 @@ const pairs = ref<string[]>(initialPairs)
 const facetMode = ref<FacetMode>(initialMode)
 /** 備考の有無(any=条件なし / present / absent)。有無ボタンは即適用する。 */
 const remarkState = ref<RemarkState>(initialRemarkState)
+/** 任意項目の有無(キー → any/present/absent)。未設定のキーは any(条件なし)。ボタンは即適用。 */
+const keyPresence = ref<Record<string, 'any' | 'present' | 'absent'>>(initialKeyPresence)
+/** 任意項目の値選択(キー → 選択値。同一キー内は OR、in.()。chip は即適用)。 */
+const keySelections = ref<Record<string, string[]>>(initialKeySelections)
+/** 部分一致検索の対象キーと語(1つのキーだけ絞る。語は code・氏名と同じデバウンス)。 */
+const containsKey = ref(initialContains?.key ?? '')
+const containsInput = ref(initialContains?.value ?? '')
+/** 行に表示するキー(絞り込みせず表示だけ。ItemRow の extra-keys に渡す)。 */
+const showKeys = ref<string[]>(initialShowKeys)
 /** 年・組の欄は縦に場所を取る(年9×組5 のマトリクス)ので、折りたたんで一覧を先に大きく見せる。
  *  初期選択があれば開いておく(消した条件を隠さない)。 */
 const facetSectionOpen = ref(initialYears.length + initialGroups.length + initialPairs.length > 0)
 /** 備考の欄も折りたたみ(閉じるとボタン1行だけ。条件領域を普段は大きくしない)。初期条件があれば開く。 */
 const remarkSectionOpen = ref(initialRemarkState !== 'any' || !!initialRemark)
+/** 項目の欄も折りたたみ(キー数の行が縦に並ぶので閉じて普段は条件領域を増やさない)。初期条件があれば開く。 */
+const keySectionOpen = ref(initialKeyFilters.length > 0)
 const active = ref<{
   code: string
   name: string
@@ -112,6 +157,7 @@ const active = ref<{
   pairs: string[]
   remark: string
   remarkState: RemarkState
+  keyFilters: KeyFilter[]
 }>({
   code: initialCode,
   name: initialName,
@@ -120,6 +166,7 @@ const active = ref<{
   pairs: initialPairs,
   remark: initialRemark,
   remarkState: initialRemarkState,
+  keyFilters: initialKeyFilters,
 })
 
 const rows = ref<ItemRowData[]>([])
@@ -135,6 +182,24 @@ const errorMessage = useState<string | null>('items-error', () => null)
 const facets = useState<ItemsFacets | null>('items-facets', () => null)
 const facetError = useState<string | null>('items-facets-error', () => null)
 
+/** 任意項目(payload キー)の発見結果(有無の件数・選択肢)。SSR で解決して hydration に引き継ぐ。 */
+const keysState = useState<ItemsKeysResponse | null>('items-keys', () => null)
+const keysError = useState<string | null>('items-keys-error', () => null)
+
+/** 項目欄に並べるキー(年・組・氏名・備考は専用欄があるので二重コントロールにしない)。 */
+const DEDICATED_ITEM_KEYS = new Set([ITEM_YEAR_KEY, ITEM_GROUP_KEY, ITEM_NAME_KEY, ITEM_REMARK_KEY])
+/** chip で値選択できる選択肢数の上限(これを越えるキーは部分一致で絞る。FACET_MAX_VALUES より小さい表示上限)。 */
+const KEY_CHIP_MAX = 8
+
+const genericKeys = computed<ItemKeyEntry[]>(() =>
+  (keysState.value?.keys ?? []).filter((entry) => !DEDICATED_ITEM_KEYS.has(entry.key)),
+)
+
+/** 表示キー chip の選択肢(値は payload キーそのまま。count はあり側の件数=表示の意味情報)。 */
+const showKeyOptions = computed<FacetOption[]>(() =>
+  genericKeys.value.map((entry) => ({ value: entry.key, count: entry.presentCount })),
+)
+
 /** SSR で解決した1ページ目は useState で hydration 時に引き継ぐ(再fetch防止)。初期条件が一致するものだけ再利用する。 */
 const cachedFirst = useState<{
   code: string
@@ -144,6 +209,7 @@ const cachedFirst = useState<{
   pairs: string[]
   remark: string
   remarkState: RemarkState
+  keyFilters: KeyFilter[]
   page: ItemsPage
 } | null>('items-first-page', () => null)
 
@@ -163,6 +229,7 @@ interface FilterCondition {
   pairs: string[]
   remark: string
   remarkState: RemarkState
+  keyFilters: KeyFilter[]
 }
 
 // IntersectionObserver の有無はクライアントでのしか分からない(SSR では undefined)。
@@ -186,6 +253,7 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
   const name = active.value.name
   const remark = active.value.remark
   const remarkStateApplied = active.value.remarkState
+  const keyFiltersApplied = active.value.keyFilters
   // facet は applyFilters で active に写してから load を呼ぶので、ここで読んだ値は適用済み条件
   const selectedYears = years.value
   const selectedGroups = groups.value
@@ -206,6 +274,8 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
         remark: remark || undefined,
         // 条件なし(any)は送らない(URL を短く保つ。既定の状態は「送らない」と同じ)
         remarkState: remarkStateApplied === 'any' ? undefined : remarkStateApplied,
+        // 任意項目の絞り込みは spec 文字列の配列で送る(値に `,` が混ざっても配列なら壊れない)
+        filters: keyFiltersApplied.length ? serializeKeyFilters(keyFiltersApplied) : undefined,
         cursor: cur ?? undefined,
         limit: ITEM_PAGE_SIZE,
       },
@@ -225,6 +295,7 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
         pairs: selectedPairs,
         remark,
         remarkState: remarkStateApplied,
+        keyFilters: keyFiltersApplied,
         page,
       }
     }
@@ -249,8 +320,23 @@ async function loadFacets(): Promise<void> {
   }
 }
 
+/** 任意項目(payload キー)の発見結果を取得する(失敗しても一覧と他の欄は出せるので keysError だけ立てる)。 */
+async function loadKeys(): Promise<void> {
+  keysError.value = null
+  try {
+    keysState.value = await $fetch<ItemsKeysResponse>('/api/items-keys', {
+      headers: useRequestHeaders(['cookie']),
+    })
+  } catch (e: unknown) {
+    keysError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
 const SEARCH_DEBOUNCE_MS = 250
 let debounceTimer: ReturnType<typeof setTimeout> | undefined
+
+/** 行に表示するキーのローカル保存(表示設定。絞り込み条件とは別に再訪問で復元する)。 */
+const SHOW_KEYS_STORAGE_KEY = 'items-show-keys'
 
 function currentCondition(): FilterCondition {
   return {
@@ -261,7 +347,24 @@ function currentCondition(): FilterCondition {
     pairs: [...pairs.value],
     remark: normalizeFilter(remarkInput.value) ?? '',
     remarkState: remarkState.value,
+    keyFilters: currentKeyFilters(),
   }
+}
+
+/** キー別状態(有無・値選択・部分一致1キー)を送信用の KeyFilter 一覧にまとめる。 */
+function currentKeyFilters(): KeyFilter[] {
+  const out: KeyFilter[] = []
+  for (const [key, state] of Object.entries(keyPresence.value)) {
+    if (state === 'present' || state === 'absent') out.push({ key, mode: state, value: '', values: [] })
+  }
+  for (const [key, values] of Object.entries(keySelections.value)) {
+    if (values.length) out.push({ key, mode: 'in', value: '', values: [...values] })
+  }
+  const containsValue = normalizeFilter(containsInput.value)
+  if (containsKey.value && containsValue) {
+    out.push({ key: containsKey.value, mode: 'contains', value: containsValue, values: [] })
+  }
+  return out
 }
 
 function sameCondition(a: FilterCondition, b: FilterCondition): boolean {
@@ -272,7 +375,8 @@ function sameCondition(a: FilterCondition, b: FilterCondition): boolean {
     sameSelection(a.groups, b.groups) &&
     sameSelection(a.pairs, b.pairs) &&
     a.remark === b.remark &&
-    a.remarkState === b.remarkState
+    a.remarkState === b.remarkState &&
+    sameKeyFilters(a.keyFilters, b.keyFilters)
   )
 }
 
@@ -337,7 +441,31 @@ function setRemarkState(next: RemarkState) {
   applyNow()
 }
 
-/** UI に表示されている条件のどれかが入っているか(リセットボタンの有効判定)。 */
+/** 任意項目の有無ボタン(あり/なし)。再押で「すべて(条件なし)」に戻る。即適用。 */
+function toggleKeyPresence(key: string, mode: 'present' | 'absent') {
+  keyPresence.value[key] = keyPresence.value[key] === mode ? 'any' : mode
+  applyNow()
+}
+
+/** 任意項目の値 chip(複数選択で OR)。再押で解除(toggled と同じ)。即適用。 */
+function toggleKeyValue(key: string, value: string) {
+  keySelections.value[key] = toggled(keySelections.value[key] ?? [], value)
+  applyNow()
+}
+
+/** 部分一致の対象キーを選んだ(セレクトは即適用。語の入力はないと条件にならない)。選べないキーは条件にしない。 */
+function selectContainsKey(key: string) {
+  containsKey.value = isFilterableKey(key) ? key : ''
+  applyNow()
+}
+
+/** 行に表示するキーを選ぶ(絞り込みではなく表示のみ。条件ではないので applyNow しない)。 */
+function toggleShowKey(key: string) {
+  showKeys.value = toggled(showKeys.value, key)
+  if (import.meta.client) localStorage.setItem(SHOW_KEYS_STORAGE_KEY, JSON.stringify(showKeys.value))
+}
+
+/** UI に表示されている条件のどれかが入っているか(リセットボタンの有効判定)。表示キーは条件ではないので数えない。 */
 const hasFilters = computed(
   () =>
     !!codeInput.value ||
@@ -346,10 +474,13 @@ const hasFilters = computed(
     years.value.length > 0 ||
     groups.value.length > 0 ||
     pairs.value.length > 0 ||
-    remarkState.value !== 'any',
+    remarkState.value !== 'any' ||
+    Object.values(keyPresence.value).some((state) => state !== 'any') ||
+    Object.values(keySelections.value).some((values) => values.length > 0) ||
+    (!!containsKey.value && !!containsInput.value.trim()),
 )
 
-/** 絞り込み条件を一度に消す(code・氏名・年・組・ペア・備考の有無と検索)。選択モードは維持する。条件がなければ無効。 */
+/** 絞り込み条件を一度に消す(code・氏名・年・組・ペア・備考の有無と検索・任意項目の有無と値選択と部分一致)。選択モードと表示キーは維持する。条件がなければ無効。 */
 function resetFilters() {
   codeInput.value = ''
   nameInput.value = ''
@@ -358,16 +489,20 @@ function resetFilters() {
   groups.value = []
   pairs.value = []
   remarkState.value = 'any'
+  keyPresence.value = {}
+  keySelections.value = {}
+  containsKey.value = ''
+  containsInput.value = ''
   applyNow()
 }
 
-/** 折りたたみ欄のラベル(閉じていても選択状態が分かるように件数を出す)。 */
+/** 折りたたみ欄のラベル(閉じていても選択状態が分かるように件数を出す。ラベルは短く保つ=3トグルが mobile の1行に収まる)。 */
 const facetSelectionSummary = computed(() => {
-  if (facetMode.value === 'pair') return pairs.value.length ? `${pairs.value.length} セル選択中` : '選択なし'
+  if (facetMode.value === 'pair') return pairs.value.length ? `${pairs.value.length} セル選択中` : 'なし'
   const parts = []
   if (years.value.length) parts.push(`${years.value.length} 年`)
   if (groups.value.length) parts.push(`${groups.value.length} 組`)
-  return parts.length ? parts.join(' + ') : '選択なし'
+  return parts.length ? parts.join(' + ') : 'なし'
 })
 
 /** 備考欄のラベル。閉じていても有無の選択と検索入力が見える(長い入物は省略して短く出す)。 */
@@ -380,7 +515,16 @@ const remarkSelectionSummary = computed(() => {
   return `${presence} + 「${shown}」`
 })
 
-watch([codeInput, nameInput, remarkInput], () => {
+/** 項目欄のラベル。閉じていても有無・値選択・部分一致の選択数が分かる(長い入物は省略して短く出す)。 */
+const keySelectionSummary = computed(() => {
+  const n = currentKeyFilters().length
+  if (n === 0) return 'なし'
+  const term = containsInput.value.trim()
+  const shown = term.length > 8 ? `${term.slice(0, 8)}…` : term
+  return term ? `${n}項目 + 「${shown}」` : `${n}項目`
+})
+
+watch([codeInput, nameInput, remarkInput, containsInput], () => {
   pending.value = true
   if (debounceTimer) clearTimeout(debounceTimer)
   debounceTimer = setTimeout(() => {
@@ -418,6 +562,17 @@ async function loadMore(): Promise<void> {
 
 onMounted(() => {
   ioSupported.value = typeof IntersectionObserver === 'function'
+  // 行に表示するキーを localStorage から復元(表示設定。URL の初期指定があればそちらを優先する)。
+  if (!showKeys.value.length) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SHOW_KEYS_STORAGE_KEY) ?? 'null')
+      if (Array.isArray(saved)) {
+        showKeys.value = normalizeSelection(saved)
+      }
+    } catch {
+      // 壊れた保存内容は捨てる(次回トグルで上書きされる)
+    }
+  }
   if (!ioSupported.value || !sentinel.value) return
   observer = new IntersectionObserver(
     (entries) => {
@@ -487,6 +642,7 @@ const reuseFirstPage =
     pairs: initialPairs,
     remark: initialRemark,
     remarkState: initialRemarkState,
+    keyFilters: initialKeyFilters,
   })
 
 if (reuseFirstPage && cachedFirst.value) {
@@ -499,6 +655,7 @@ if (reuseFirstPage && cachedFirst.value) {
 
 const initialLoads: Promise<void>[] = []
 if (!facets.value) initialLoads.push(loadFacets())
+if (!keysState.value) initialLoads.push(loadKeys())
 if (!reuseFirstPage) initialLoads.push(load({ reset: true, initial: true }))
 await Promise.all(initialLoads)
 </script>
@@ -534,6 +691,16 @@ await Promise.all(initialLoads)
             @click="remarkSectionOpen = !remarkSectionOpen"
           >
             備考 <span class="muted">({{ remarkSelectionSummary }})</span>
+          </button>
+          <button
+            class="btn secondary key-toggle"
+            type="button"
+            :aria-expanded="keySectionOpen"
+            aria-controls="key-panel"
+            aria-label="項目(任意の payload キー)の絞り込み欄を開閉"
+            @click="keySectionOpen = !keySectionOpen"
+          >
+            項目 <span class="muted">({{ keySelectionSummary }})</span>
           </button>
         </div>
 
@@ -643,6 +810,95 @@ await Promise.all(initialLoads)
           </p>
         </div>
 
+        <!-- 項目の欄: 任意の payload キー(ボランティア欄など同期で載る項目)ごとの有無ボタン + 値 chip + 部分一致1キー + 表示のみトグル -->
+        <div id="key-panel" v-show="keySectionOpen" class="key-panel">
+          <p v-if="keysError" class="muted hint">項目の一覧を取得できませんでした({{ keysError }})</p>
+          <template v-else>
+            <div v-for="entry in genericKeys" :key="entry.key" class="key-row">
+              <div class="key-head">
+                <span class="key-label">
+                  {{ entry.key }}<span v-if="entry.fromConfig && !entry.seenInData" class="muted">(同期待ち)</span>
+                </span>
+                <div class="mode-row">
+                  <button
+                    class="btn secondary"
+                    type="button"
+                    :class="{ active: keyPresence[entry.key] === 'present' }"
+                    :aria-pressed="keyPresence[entry.key] === 'present'"
+                    :disabled="!isFilterableKey(entry.key)"
+                    @click="toggleKeyPresence(entry.key, 'present')"
+                  >
+                    あり<span class="muted">{{ entry.presentCount }}</span>
+                  </button>
+                  <button
+                    class="btn secondary"
+                    type="button"
+                    :class="{ active: keyPresence[entry.key] === 'absent' }"
+                    :aria-pressed="keyPresence[entry.key] === 'absent'"
+                    :disabled="!isFilterableKey(entry.key)"
+                    @click="toggleKeyPresence(entry.key, 'absent')"
+                  >
+                    なし<span class="muted">{{ entry.absentCount }}</span>
+                  </button>
+                </div>
+              </div>
+              <FacetChipGroup
+                v-if="isFilterableKey(entry.key) && entry.options.length && entry.options.length <= KEY_CHIP_MAX"
+                :label="`${entry.key}の値(複数選択でOR)`"
+                :options="entry.options"
+                :selected="keySelections[entry.key] ?? []"
+                :loading="!keysState"
+                @toggle="(value: string) => toggleKeyValue(entry.key, value)"
+              />
+              <p v-else-if="!isFilterableKey(entry.key)" class="muted hint">
+                このキーは `"` を含むか長さ上限を超えており、検索での絞り込みはできません(PostgREST の照会が安全に組めないため。行への表示のみ可能です)。
+              </p>
+              <p v-else-if="entry.options.length > KEY_CHIP_MAX" class="muted hint">
+                値の選択肢が {{ entry.options.length }} 件あるため chip 選択はしません(下の部分一致で絞れます)。
+              </p>
+            </div>
+            <p v-if="keysState?.truncated" class="muted hint">
+              項目の発見は先頭 {{ keysState.scanned }} 件の範囲から行っています(それ以降のキーは出ていない場合があります)。
+            </p>
+
+            <!-- 部分一致: 対象キーを1つ選んで語で絞る(語は code・氏名と同じデバウンス、キーセレクトは即適用) -->
+            <div class="contains-row">
+              <label class="key-select-wrap">
+                <span class="muted">部分一致する項目</span>
+                <select
+                  class="key-select"
+                  :value="containsKey"
+                  aria-label="部分一致検索する項目を選ぶ"
+                  @change="selectContainsKey(($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="">項目を選択</option>
+                  <option
+                    v-for="entry in genericKeys"
+                    :key="entry.key"
+                    :value="entry.key"
+                    :disabled="!isFilterableKey(entry.key)"
+                  >
+                    {{ entry.key }}
+                  </option>
+                </select>
+              </label>
+              <ClearableInput v-model="containsInput" label="項目の部分一致(選択したキー)" placeholder="値の一部を入力" />
+            </div>
+
+            <!-- 表示のみ: 選んだキーの値を一覧行に追加する(絞り込み条件は変わらない。ローカル保存) -->
+            <FacetChipGroup
+              label="行に表示する項目(絞り込まず表示だけ)"
+              :options="showKeyOptions"
+              :selected="showKeys"
+              :loading="!keysState"
+              @toggle="toggleShowKey"
+            />
+            <p class="muted hint">
+              あり=値が入っている行、なし=空・未記入(キー欠落・null・空文字)の行です。項目同士・備考・code・氏名・年・組との指定はすべて AND で絞ります。「行に表示する項目」は条件を変えず行に値を追加します(ローカルに保存され、リセットでは消えません)。
+            </p>
+          </template>
+        </div>
+
         <button class="btn secondary" type="button" :disabled="!hasFilters" @click="resetFilters">
           条件をリセット
         </button>
@@ -658,7 +914,7 @@ await Promise.all(initialLoads)
 
     <div class="card">
       <ul v-if="rows.length" class="item-list">
-        <ItemRow v-for="item in rows" :key="item.code" :item="item" />
+        <ItemRow v-for="item in rows" :key="item.code" :item="item" :extra-keys="showKeys" />
       </ul>
       <p v-else-if="loading || pending" class="muted">読み込み中…</p>
       <p v-else-if="!errorMessage" class="muted">該当するレコードがありません。</p>
@@ -706,6 +962,60 @@ await Promise.all(initialLoads)
   gap: 12px;
 }
 
+/* 項目の欄: キーごとに「ラベル+有無ボタン」の行と値 chip。閉じるとトグル1行だけなので条件領域は普段増えない */
+.key-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.key-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.key-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.key-label {
+  font-size: 14px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.mode-row .btn span.muted {
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 部分一致の対象キーセレクト(ClearableInput と同じ縦積みのラベル付き欄) */
+.contains-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.key-select-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.key-select {
+  background: #122033;
+  border: 1px solid var(--muted);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  padding: 10px 12px;
+}
+
 .mode-row {
   display: flex;
   flex-wrap: wrap;
@@ -721,10 +1031,12 @@ await Promise.all(initialLoads)
   box-shadow: inset 0 0 0 2px rgba(120, 190, 255, 0.8);
 }
 
+/* 閉じた時のトグル3個(年・組/備考/項目)は mobile の1行に収める(ラベルは短い状態語だけ。padding を削って326px欄に316pxで収まる) */
 .facet-toggle,
-.remark-toggle {
+.remark-toggle,
+.key-toggle {
   font-size: 14px;
-  padding: 8px 12px;
+  padding: 8px 10px;
 }
 
 .hint {
