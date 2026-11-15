@@ -689,8 +689,11 @@ await keyToggle.click()
 await page.waitForTimeout(200)
 if ((await keyToggle.getAttribute('aria-expanded')) !== 'true') ok = false
 const keyRowCount = await page.locator('.key-row').count()
-out.push(`項目欄(開いた状態): キー行の数=${keyRowCount}(>=1 が期待値)`)
-if (keyRowCount < 1) ok = false
+// 設定由来と実データ由来のキーは両方に載るので、各行は1回だけ(重複出現は API の和集合バグの指標)
+const keyLabels = await page.locator('.key-row .key-label').evaluateAll((els) => els.map((el) => el.textContent.trim()))
+const keysUnique = keyLabels.length === new Set(keyLabels).size
+out.push(`項目欄(開いた状態): キー行の数=${keyRowCount}(>=1 が期待値) / キー名が重複なく1回ずつ=${keysUnique}(ラベル ${keyLabels.length}個 / 重複除き ${new Set(keyLabels).size}個)`)
+if (keyRowCount < 1 || !keysUnique) ok = false
 
 // 検索できてあり/なし両方のキーを1つ選ぶ(ボタンは「あり N / なし M」の件数を出す)
 async function keyRowInfo(idx) {

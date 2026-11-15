@@ -69,8 +69,10 @@ export default defineEventHandler(async (event): Promise<ItemsKeysResponse> => {
     }
   }
 
+  // 2つの源の和集合。`[...candidates, ...seen]` の連結は両方に載るキーを2回出すので Set で除重する
+  const union = new Set<string>([...candidates, ...seen])
   const keys: ItemKeyEntry[] = []
-  for (const key of [...candidates, ...seen]) {
+  for (const key of union) {
     const presentCount = present.get(key) ?? 0
     keys.push({
       key,
