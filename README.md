@@ -11,8 +11,10 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
 |---|---|---|
 | `/` | 不要 | トップページ。状態に応じてログイン/QRリンク |
 | `/login` | 不要 | ログインページ(未認証時はグローバルミドルウェア从这里へ) |
-| `/scan` | 必要 | QRコードをカメラで連続スキャン(@zxing/library) |
-| `/result` | 必要 | QRの値(または一覧の行)で Supabase `items` を照会し、カード形式で結果表示 |
+| `/scan` | 必要 | QRコードをカメラで連続スキャン(`qr-scanner`)。**モード選択**で「照会」(従来: 1読み取りごとに `/result` へ遷移)と「記録」(連続で次々と読み、シートへ書く)を選べる。詳細は下の「スキャンの記録」 |
+| `/records` | 必要(登録済み) | スキャンの記録履歴(`scan_events`)の閲覧。モード・状態・code・期間で絞り込み + seq 降順のカーソル分页。監査用(証跡は update/delete 不可) |
+| `/scan-settings` | 必要(登録済み) | 記録モードの設定画面: 追加・変更(名前・書く列の組・フラグに書く値・payload キー・確認/連続・重複・見つからない code・有効無効)・削除・シートの列追加。既定の2モードも DB のシード行なので同じように編集・削除できる |
+| `/result` | 必要 | QRの値(または一覧の行)で Supabase `items` を照会し、カード形式で結果表示。このコードのスキャン記録履歴(日時付き・新しい順)も同じカードに出す |
 | `/items` | 必要 | `items` のレコード一覧(スクロールで追記 + code/氏名/備考のインクリメンタル検索 + 折りたたみできる年・組の絞り込み[単独 chip / 年×組マトリクス] + 折りたたみできる備考の絞り込み[有無の3ボタン + 部分一致] + 折りたたみできる任意 payload キーの絞り込み[キーの有無 + 値選択 + 部分一致] + 表示のみのキー選択 + 条件リセット + 行を開いても絞り込み状態を保持) |
 | `/unauthorized` | 不要(案内用) | Google認証済みだが users に紐付けがない場合の案内 + 許可依頼QR |
 | `/register` | 必要(登録済み) | 利用者登録画面: 許可依頼QRを読んで依頼者のemail確認 → 許可 |
@@ -27,9 +29,9 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
 |---|---|
 | 未認証 | トップ / ログイン(`/login`) |
 | 認証済み・未登録 | トップ / 許可依頼(`/unauthorized`) / 管理(dropdown: ログアウト) |
-| 認証済み・許可済み | トップ / QRスキャン(`/scan`) / 一覧(`/items`) / 管理(dropdown: アプリ共有`/share`・利用者登録`/register`・同期`/sync`・ログアウト) |
+| 認証済み・許可済み | トップ / QRスキャン(`/scan`) / 一覧(`/items`) / 管理(dropdown: アプリ共有`/share`・利用者登録`/register`・同期`/sync`・記録の設定`/scan-settings`・記録履歴`/records`・ログアウト) |
 
-- 管理系項目は「管理」ボタンの dropdown menu にまとめて常駐バーの項目数を抑える(dropdown はバーの上に開く。外側クリック / Escape / ルート変更で閉じる。格納先ルート(`/share`・`/register`・`/sync`)にいるとき「管理」が点灯し、menu 内の現ページは `aria-current="page"`)。許可依頼は未登録ユーザの主動作なのでバーに直接残す。
+- 管理系項目は「管理」ボタンの dropdown menu にまとめて常駐バーの項目数を抑える(dropdown はバーの上に開く。外側クリック / Escape / ルート変更で閉じる。格納先ルート(`/share`・`/register`・`/sync`・`/scan-settings`・`/records`)にいるとき「管理」が点灯し、menu 内の現ページは `aria-current="page"`)。許可依頼は未登録ユーザの主動作なのでバーに直接残す。
 - ログアウトはルートではなく action(`useLogout()` → `POST /api/logout` → `/`)。ページ内の「ログアウト」ボタンは重複なので撤去した(`/index`・`/login`・`/scan`・`/register`・`/unauthorized`)。バー時代のログアウトは dropdown 内(dropdown 項目は route を変わらないので選択時に自前で閉じる)。
 - `/result` では QRスキャン が点灯する(スキャンの延長という扱い)。
 - 未認証時に保護リンクを出さない理由: ミドルウェアが `/login?returnTo=` に誘導するため、押しても遷移しない(出すと「動かないリンク」になる)。
@@ -70,6 +72,24 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
 - **備考のインライン編集**: 備考行だけ「編集」ボタンを添える(備考が空/欠落の行も必ず出し、空行の編集が「追加」の入口になる)。textarea に書いて「保存」すると `POST /api/remark-update`(`requireRegisteredUser`、body `{code, remark}`、上限 `REMARK_MAX_LENGTH`)へ。API は code から備考セルをその場で引く(ヘッダー=1行目、列名は rename の逆引き = `shared/utils/sync.ts` の `sourceColumnFor`、セル番地は `a1Cell`)し、Sheets の `values.update`(RAW)でシートへ書き、同じ値を items payload にも反映する(空の備考はキー削除 = 取り込み側の empty skip と同じ挙動)。シートが正なので書き込み順はシート→DB で、DB 更新だけが失敗したときは `dbUpdated: false` を返して画面に注記を出す(シートは保存済みなので次の同期で一致する)。保存成功後はローカルの result を更新して再fetchしない(画面に即反映)。code が変わったら編集状態は閉じる。
 - **SSR/クライアントで同じ文字列にする**: `toLocaleString` や `localeCompare` は ICU の挙動差で hydration mismatch の原因になるので使わない(3桁区切りは正規表現、個数系の並びは code point 順、取り込み日時 JST 表記は手計算)。
 - **code が無い/見つからない**: code 無しは照会しない(API は 400 を返すだけ)し、案内カードを出す。見つからない場合もコードを添えた案内カードを出す。戻るボタンは「スキャンに戻る」と「一覧に戻る」の2つ。
+
+## スキャンの記録(`/scan` の記録モード、`/scan-settings` の設定、`/records` の履歴)(設計: `docs/scan-modes.md`)
+
+QR読み取りを「照会」ではなく「記録」にも使えるようにする。モード単位で「何を・どの列に・確認してからか」を決め、記録はスプレッドシートへ書き、証跡は `scan_events` に残す。
+
+- **モード(`public.scan_modes`、マイグレーション 0006)**: `{ name, actions(jsonb), dedupe(warn|skip|allow), confirm_before_record, require_found, enabled }`。`actions` は1モードに1〜3個(`SCAN_ACTIONS_MAX`)で、各 action は `{ column, columnAt, literal, payloadKey, payloadAtKey }`(シートに書く列と payload に載るキー)。シート/DB は snake_case、画面/API は camelCase なので `shared/utils/scan.ts` の `normalizeAction` が両方読む。
+  - シードは2モード: 「チケット配布」(配布済 / 配布日時、`confirm_before_record=false` = 連続)と「チェックイン」(来場済 / 来場日時、`confirm_before_record=true` = 氏名を確認してから記録)。**この2つはマイグレーションの insert で作られた DB の行**なので、他のモードと同じように編集・削除できる(コードに埋めた既定値ではない。`scan_modes` が空のときだけ既定プリセットを画面に表示し、保存で行が作られる)。
+  - 増減・変更は `/scan-settings`(設定画面)からまとめて行える。`/scan` の「新しい記録を作る」でもその場で作れる(スキャン画面から運用を始められる導線)。どちらも `POST /api/scan-config` に**ドラフトのリストを丸ごと**送る(リストが正 = 無い id は削除)。履歴のあるモードは FK が `on delete restrict` なので削除できず、400 で「無効化してください」を案内する(設定画面では有効/無効のトグルが並ぶ)。
+  - RLS は `sync_settings` と同じ「登録済みユーザのみ」(select/insert/update/delete)。`scan_events` は select/insert のみ(update/delete ポリシーなし = 証跡は不変)。
+- **API**: `GET/POST /api/scan-config`(モード一覧 + `serviceAccountConfigured` + `syncIncludeColumns` + `rowMissing` + `sheetTitle`/`sheetHeaders`。シートの実ヘッダーは設定画面の「列が無い」判定用に読むだけで、読み取り失敗・未設定は `null` にする(API は落ちない — SSR がシート読み取りの失敗で落ちないようにする)、`POST /api/scan-check`(`{modeId, code}` → 氏名・現在の済/未・読み取り時刻。シートへ書かない読み取り専用)、`POST /api/scan-flush`(`{codes: [{code, overwrite}]}` → シートへまとめて書き、items payload に反映、`scan_events` に証跡)、`POST /api/scan-columns`(`{columns, addToIncludeColumns}` → シートの列を `spreadsheets:batchUpdate` の `appendDimension` で追加しヘッダーを `values.update` で書く。既定 grid 拡張に頼らない。`addDimensionRange` は spreadsheet 単位の endpoint に無いリクエストなので 400 になる(シート単位の endpoint の SheetContentRequest)。`codeColumn` は載せない)、`GET /api/scan-history`(mode/status/code/from/to + `cursor`(seq)/`limit`、`{ rows, nextCursor, total }`)。
+- **シートの値と表示**: フラグ列には `SCAN_FLAG_VALUE`(`済`)、日時列には `formatJst()`(手計算の `YYYY-MM-DD HH:mm (JST)`。`toLocaleString` は環境差になるので使わない)。payload にも同じ2キーを載せる。表示側の「済/未」は `recordState()` で正規化する(空・`未`・no/false/ng は未。フラグが空でも日時があれば済)。
+- **書き込みはまとめる**: check は読み取り専用で、連続モードは5件(`SCAN_AUTO_FLUSH_COUNT`)ため自動 flush + 「書き込みを確定」ボタンでまとめて flush(`values:batchUpdate`、1 range = 1セル、`SHEETS_BATCH_MAX`=100)。確認モードは「記録」ボタンで1件を確定した瞬間に flush する(確認したのに5件ためるまで書されないのは不自然)。シートが正なので書き込み順はシート→items(`remark-update` と同じ)。items の更新が失敗したぶんは `dbUpdated: false` と注記で出す(シートは保存済み、次の同期で一致する)。
+- **payload が消えないための注意**: 同期の upsert は payload を丸ごと書き換えるため、記録列を `sync_settings.include_columns` に載せないと次の同期で payload から消える。`POST /api/scan-columns` は列作成時に `include_columns` へ追加する(`addToIncludeColumns: false` で抑制可)。
+- **重複(dedupe)**: 同じ code を `SCAN_DEDUPE_WINDOW_MS`(2.5秒)内で再読するとスキャン側で無視(`isSameScan`)。モードの `dedupe` は `warn`(既定・書き込まない、確認モードの「上書き」だけ `overwrite` で書く)/ `skip`(`skipped` の証跡だけ残す)/ `allow`(上書きして `duplicate` の証跡に上書き事実を残す)。
+- **シート索引のキャッシュ**: code→行番号の索引はプロセス内キャッシュ(TTL 60秒)。列追加後は `invalidateSheetIndexCache` で捨てる。サービスアカウントは対象シートの**編集者以上**が必要(読み取りは readonly スコープのまま)。
+- **画面**: `/scan` は `definePageMeta({ keepalive: true, scrollToTop: false })`(モード選択・セッションの待機列・作成欄が `/result` に開いても残る)。`app/components/QrScanner.vue` に `continuous` / `busy` props を追加(連続スキャンは検出しても止めない。`busy` の間の検出は捨てる)。`/records` は SSR で1ページ目を解決して `useState` に引き継ぎ、絞り込み変更で reload、`さらに表示` で seq カーソルの追記。`/scan-settings` は DB の値をドラフトとしてコピーし(`useState`)、編集したら「変更を保存」でリストを丸ごと POST、「変更を破棄」で DB の値を引き直す(保存していない変更はラベルに出る)。
+- **列が無いときの注記(失敗を先に伝える)**: モードの書く列がシートのヘッダーに無いと flush は 400 になる。`/scan-settings` は各モードの列が `sheetHeaders` にあるかを見て「シートのヘッダーにありません」+「シートの列を追加」ボタンを出し、`/scan` は選択中のモードの欠け列を error で出す。取り込みカラムに無い列も「載せないと次の同期で payload から消えます」の注記と追加ボタンを出す。列の作成と書き込みには サービスアカウント鍵(`GOOGLE_SERVICE_ACCOUNT_JSON`)+ シート ID(`sync_settings.spreadsheet_id`)が必要なので、ローカル dev で列作成を試すときは `GOOGLE_SERVICE_ACCOUNT_JSON` を env に渡して dev サーバを起動する(`npm run dev` は `.dev.vars` を process.env に写さないため、鍵が無いと 400 の鍵エラーになる — 列追加が失敗したときはまずこれ)。
+- **検証**: `node scripts/verify-scan-record.mjs`(dev サーバ + ローカル Supabase + シート設定。連続スキャンで3件のQRを順に流し、待機列に氏名が並ぶことを確認)。`VERIFY_SCAN_FLUSH=1` を付けると「書き込みを確定」まで実行し `/records` の履歴も確認する(**設定されたシートに 配布済/配布日時 を書く**ので、ローカルの dev シートに対してだけ実行すること)。設定画面の増減・変更・削除と導線は `node scripts/verify-scan-settings.mjs`(使い捨てのモードを「既存の列だけ使う」で作る = シートに列を書かない。作成 → `/scan` のチップに現れる → 改名と重複の扱いの変更 → 削除 → `/scan`・`/records`・bottom nav の dropdown から設定へ到達できる)。確認モードの記録は `node scripts/verify-scan-confirm.mjs`(チェックインで1件のQR → pending card の氏名 → 「記録」で即 flush → `/api/scan-check` の状態が `済` → `/records` に履歴。**確認モードは即 flush するので 来場済/来場日時 を設定されたシートに書く** — dev シートに対してだけ実行すること)。単体は `test/unit/scan.test.ts`、RLS と証跡の統合は `test/supabase/scan-flow.test.ts`(`npm run test:local`)。
 
 ## 認証の仕組み
 
@@ -126,7 +146,7 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
    - 開発ホスト許可は `DEV_ALLOWED_HOSTS` / `NUXT_VITE_ALLOWED_HOST`(nuxt.config にホストをハードコードしない)
    - アプリサーバーは Secret key を使わない(items の insert/update は RLS の `is_registered_user()` で許可する。Secret key は CLI の同期だけ)
 3. Supabase 側:
-   - `supabase/migrations/0001_init.sql` → `supabase/migrations/0002_registration_requests.sql` → `supabase/migrations/0003_sync_settings.sql` → `supabase/migrations/0004_sync_row_filter.sql` → `supabase/migrations/0005_sync_prune.sql` を SQL Editor でこの順に実行(users / items / ドメイン表 / RLS / 関数 + 許可依頼の依頼テーブルと RPC + 同期設定テーブル `sync_settings` とシード行 + 行フィルタ列(filter_column / filter_values)+ prune 列(prune_on_commit)と items 削除ポリシー。関数が RLS ポリシーより先に作成される順になっている)
+   - `supabase/migrations/0001_init.sql` → `supabase/migrations/0002_registration_requests.sql` → `supabase/migrations/0003_sync_settings.sql` → `supabase/migrations/0004_sync_row_filter.sql` → `supabase/migrations/0005_sync_prune.sql` → `supabase/migrations/0006_scan_modes.sql` を SQL Editor でこの順に実行(users / items / ドメイン表 / RLS / 関数 + 許可依頼の依頼テーブルと RPC + 同期設定テーブル `sync_settings` とシード行 + 行フィルタ列(filter_column / filter_values)+ prune 列(prune_on_commit)と items 削除ポリシー + スキャンの記録モード `scan_modes`(シード2モード)と証跡 `scan_events`(select/insert のみ)。関数が RLS ポリシーより先に作成される順になっている)
      - 旧スキーマからの移行は drop して再作成(items は再同期で復元)
    - Authentication → Third-party providers → Google を有効化
    - Authentication → URL Configuration:
@@ -203,9 +223,9 @@ npm run supabase:stop
 ```
 
 - `npm run dev` は `nuxt dev --dotenv .env.development` でローカル Supabase の dev デフォルトキーを読み、本番用の `.env` は dev では使わない(hosted Supabase の認証テストをしたいときは shell の env 変数で上書きできる)。
-- スキーマは start/reset で `supabase/migrations/*.sql`(0001→0002→0003 の順)が自動適用される。ホスト版には同じファイルをこの順で SQL Editor に貼って実行するか、`supabase db push` を使う。
+- スキーマは start/reset で `supabase/migrations/*.sql`(0001→0002→0003→0004→0005→0006 の順)が自動適用される。ホスト版には同じファイルをこの順で SQL Editor に貼って実行するか、`supabase db push` を使う。
   hosted への `db push` は `npx supabase db push --remote=<project-ref>` で、**Supabase の access token(scoped: database_write)か DB のパスワード(`--password`)が必要**(service_role key では DB に繋がらない)。まず `--dry-run` で適用されるマイグレーションを確認する。
-- 統合テスト: `npm run test:local`(email 事前登録 → 初回ログインの `link_my_user()` 自動紐付け → `is_registered_user()` / items 閲覧 / 未登録拒否 + QR許可フロー: 依頼作成・再生成で旧nonce失効・preview/approve・ドメイン制限・consumed 再利用拒否 + 任意 payload キーの絞り込みの PostgREST 実挙動(`test/supabase/items-key-filter.test.ts`: present/absent の意味、absent の `or=` を複数重ねる AND、contains のリテラル、in の OR、`"` を含むキーは supabase-js で検索不可=0件/parse エラーになることを固定))。
+- 統合テスト: `npm run test:local`(email 事前登録 → 初回ログインの `link_my_user()` 自動紐付け → `is_registered_user()` / items 閲覧 / 未登録拒否 + QR許可フロー: 依頼作成・再生成で旧nonce失効・preview/approve・ドメイン制限・consumed 再利用拒否 + 任意 payload キーの絞り込みの PostgREST 実挙動(`test/supabase/items-key-filter.test.ts`: present/absent の意味、absent の `or=` を複数重ねる AND、contains のリテラル、in の OR、`"` を含むキーは supabase-js で検索不可=0件/parse エラーになることを固定) + スキャンの記録(`test/supabase/scan-flow.test.ts`: 既定2モードの閲覧、モードの増減、未登録の拒否、`scan_events` の insert/select と seq 降順のカーソル分页、証跡の不変性(authenticated に update/delete ポリシーなし → 試行は0件で空振りし値が変わらない),モード削除の `on delete restrict`))。
 - **ローカルでは Google OAuth は使えない**(ローカル gotrue はサードパーティプロバイダ非対応)。UI 検証は dev 限定のパスワードログインで行う:
   ```bash
   npm run supabase:dev-user          # 許可側テストユーザ(users 事前登録行あり)→ dev ログインで /scan に直达
@@ -218,6 +238,7 @@ npm run supabase:stop
   API 一式の実挙動確認は `node scripts/verify-registration-flow.mjs`(dev サーバ + ローカル Supabase が必要)。
   bottom navigation の項目・アクティブ表示・コンテンツとの重なりは `node scripts/verify-bottom-nav.mjs` をヘッドレス Chrome で確認する(未認証 / 許可済み / 未登録の3状態。未登録テストユーザがないときはそのシナリオはスキップされる)。
   `/items` のスクロール追記・インクリメンタル検索・行の code リンク・nav との重なり、絞り込み欄の折りたたみ(年・組・備考・項目のトグル3個が1行に並び、閉じた時の条件領域の縦が増えない)、chip の OR/AND、マトリクスのペア(1年3組+2年1組 の件数と交差0件)、備考の有無(あり+なしの和=全件、開いた行の備考の値が実際に空/非空)、備考の部分一致検索、任意キーの絞り込み(ボランティアの有無の和=全件、filters 参数付き照会、値 chip の件数一致、キーあり+組3の AND、部分一致、閉じても選択状態がラベルに出る)、表示のみのキー選択(`.item-extras` にキーの値が出る+総件数不変、リセット後も残る)、行を開いて一覧に戻った時の絞り込み状態の保持(chip 選択・総件数・スクロール位置・再fetch なし、「一覧に戻る」とブラウザの戻るの両方)は `node scripts/verify-items-page.mjs` をヘッドレス Chrome で確認する(dev サーバ + ローカル Supabase の items が必要)。
+  スキャンの記録(連続モードで3件のQRを順に流すと氏名が待機列に並び、同じQRの窓内再読は積み上がらない)は `node scripts/verify-scan-record.mjs` で確認する(dev サーバ + ローカル Supabase + `sync_settings` のシート設定 + シートの鍵が必要。`GOOGLE_SERVICE_ACCOUNT_JSON` を env に渡して dev サーバを起動する。既定はシートへ書かない。`VERIFY_SCAN_FLUSH=1` で「書き込みを確定」→ `/records` の履歴まで確認するが、設定されたシートに `配布済` / `配布日時` を書くので dev シートに対してだけ実行すること)。
   dev フォームと `/api/auth/dev-login` は本番ビルドでは無効(NODE_ENV=production で 404、UI 非表示)。hosted Supabase を指す dev(`npm run dev:tunnel`)でも無効になる(dev ユーザはローカルにしか存在しないため)。
 - メール確認リンクの確認は Mailpit (http://127.0.0.1:54324)。
 

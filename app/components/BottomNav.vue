@@ -8,7 +8,7 @@ import type { MeState } from '#shared/utils/auth'
  *  - 未認証   … トップ / ログイン(保護ページはミドルウェアが /login?returnTo= に誘導するので出さない)
  *  - 認証済み・未登録 … トップ / 許可依頼(/unauthorized) / 管理(ログアウト)
  *  - 認証済み・許可済み … トップ / QRスキャン / 一覧(/items) / 管理(dropdown menu)
- * 管理系(アプリ共有・利用者登録・同期・ログアウト)は「管理」ボタン の dropdown menu にまとめて
+ * 管理系(アプリ共有・利用者登録・同期・記録の設定・記録履歴・ログアウト)は「管理」ボタン の dropdown menu にまとめて
  * 常駐バーの項目数を抑える。許可依頼は未登録ユーザの主動作なのでバーに直接残す。
  * ログアウトはルートではなく action(/api/logout)。
  *
@@ -43,6 +43,10 @@ const ICONS = {
   sync: 'M4.5 9a8 8 0 0 1 12.5-3.5 M19.5 15a8 8 0 0 1-12.5 3.5 M17.5 3v3h-3 M6.5 21v-3h3',
   // 共有: 3つの点 を線で結んだ share 表記(アプリリンクのQRを他のスマホへ)
   share: 'M8.7 12a2.2 2.2 0 1 0-4.4 0 2.2 2.2 0 0 0 4.4 0 M19.7 6a2.2 2.2 0 1 0-4.4 0 2.2 2.2 0 0 0 4.4 0 M19.7 18a2.2 2.2 0 1 0-4.4 0 2.2 2.2 0 0 0 4.4 0 M8.5 11.2 15.6 7.1 M8.5 12.8 15.6 16.9',
+  // 記録履歴: 時計の文字盤 + 針(スキャンの記録 = いつ読んだかの監査)
+  history: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 12l4.5-3',
+  // 記録の設定: 2本のスライダー(モードの追加・変更・削除の設定画面)
+  settings: 'M4 7h9 M17 7h3 M4 17h3 M11 17h9 M13 4.5v5 M7 14.5v5',
   // 管理: 横3点(ellipsis)。dropdown のトリガー
   menu: 'M5 12h.01 M12 12h.01 M19 12h.01',
 } as const
@@ -83,16 +87,18 @@ const items = computed<(NavItem | ManageItem)[]>(() => {
     home,
     { key: 'scan', label: 'QRスキャン', icon: 'scan', to: '/scan', activePaths: ['/scan', '/result'] },
     { key: 'items', label: '一覧', icon: 'list', to: '/items' },
-    // 管理系: アプリ共有(/share)・利用者登録(/register)・同期(/sync)・ログアウト
+    // 管理系: アプリ共有(/share)・利用者登録(/register)・同期(/sync)・記録の設定(/scan-settings)・記録履歴(/records)・ログアウト
     {
       key: 'manage',
       label: '管理',
       icon: 'menu',
-      activePaths: ['/share', '/register', '/sync'],
+      activePaths: ['/share', '/register', '/sync', '/scan-settings', '/records'],
       children: [
         { key: 'share', label: 'アプリ共有', icon: 'share', to: '/share' },
         { key: 'register', label: '利用者登録', icon: 'register', to: '/register' },
         { key: 'sync', label: '同期', icon: 'sync', to: '/sync' },
+        { key: 'scan-settings', label: '記録の設定', icon: 'settings', to: '/scan-settings' },
+        { key: 'records', label: '記録履歴', icon: 'history', to: '/records' },
         logoutItem,
       ],
     },

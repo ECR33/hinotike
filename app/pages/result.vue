@@ -2,6 +2,7 @@
 // 保護は app/middleware/auth.global.ts(グローバル+ホワイトリスト)で行う
 
 import { isQuantityKey, ITEM_GROUP_KEY, ITEM_NAME_KEY, ITEM_REMARK_KEY, ITEM_YEAR_KEY, payloadValue, quantityName, REMARK_MAX_LENGTH } from '#shared/utils/items'
+import { formatJst, scanStatusMessage, type ScanHistoryResponse } from '#shared/utils/scan'
 
 const route = useRoute()
 const code = computed(() => String(route.query.code ?? ''))
@@ -47,7 +48,39 @@ watch(code, (c) => {
   if (result.value?.code !== c) void fetchLookup(c)
   // code が変わったら編集状態は古い code の内容なので閉じる
   if (result.value?.code !== c) closeRemarkEditor()
+  if (historyFor.value !== c) void fetchHistory(c)
 })
+
+/**
+ * スキャンの記録履歴(scan_events)。この code が「いつ・どのモードで・誰が」読み取ったかの監査履歴。
+ * シートセルは1値しか残らないので、来場・配布の読み取り時刻の履歴はここが正(/records でも閲覧できる)。
+ * 照会と同じ SSR 解决 + useState 引き継ぎ(code が違う缓存は stale なので client で再fetch)。
+ */
+const history = useState<ScanHistoryResponse | null>('scan-history', () => null)
+const historyFor = useState<string>('scan-history-code', () => '')
+
+async function fetchHistory(c: string) {
+  if (!c) {
+    history.value = null
+    historyFor.value = ''
+    return
+  }
+  try {
+    history.value = await $fetch<ScanHistoryResponse>('/api/scan-history', {
+      query: { code: c, limit: 20 },
+      headers: useRequestHeaders(['cookie']),
+    })
+  } catch {
+    // 履歴の取得失敗は照会結果を止めない(照会本体は別 fetch なので注記だけ出す)
+    history.value = null
+  }
+  historyFor.value = c
+}
+
+const historyCachedForCurrentCode = history.value !== null && historyFor.value === code.value
+if (code.value && !historyCachedForCurrentCode) {
+  await fetchHistory(code.value)
+}
 
 /** 備考欄のインライン編集(保存は /api/remark-update → シートと items payload に反映)。 */
 const editingRemark = ref(false)
@@ -355,6 +388,24 @@ function formatImportedAt(iso: string): string {
           </div>
         </template>
       </dl>
+
+      <!-- スキャンの記録履歴(監査)。このコードがいつ読み取られたかの日時付き履歴を新しい順に出す -->
+      <div v-if="history && history.rows.length" class="history-block">
+        <p class="history-title">スキャンの記録履歴({{ history.total }}件)</p>
+        <ul class="history-list">
+          <li v-for="rowEvent in history.rows" :key="rowEvent.seq">
+            <span class="history-status">{{ scanStatusMessage(rowEvent.status) }}</span>
+            <span class="history-at">{{ formatJst(rowEvent.at) }}</span>
+            <span class="history-mode">{{ rowEvent.modeName }}</span>
+            <span v-if="rowEvent.actorEmail" class="history-actor">{{ rowEvent.actorEmail }}</span>
+            <span v-if="rowEvent.sheetRange" class="history-range">{{ rowEvent.sheetRange }}</span>
+            <span v-if="Object.keys(rowEvent.written).length" class="history-written">
+              {{ Object.entries(rowEvent.written).map(([k, v]) => `${k}: ${v}`).join(' / ') }}
+            </span>
+          </li>
+        </ul>
+        <NuxtLink class="btn secondary history-more" to="/records">記録履歴すべて</NuxtLink>
+      </div>
     </div>
 
     <div v-else class="card">
@@ -585,6 +636,49 @@ function formatImportedAt(iso: string): string {
 .remark-error {
   margin: 0;
   color: var(--danger);
+  font-size: 12px;
+}
+
+/* スキャンの記録履歴(監査)。詳細リストの下にまとめて出す。 */
+.history-block {
+  margin-top: 14px;
+  border-top: 1px solid #1f2b3d;
+  padding-top: 10px;
+}
+
+.history-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.history-list {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.history-list li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.history-status {
+  color: var(--accent);
+}
+
+.history-at,
+.history-mode,
+.history-actor,
+.history-range,
+.history-written {
+  color: var(--muted);
   font-size: 12px;
 }
 

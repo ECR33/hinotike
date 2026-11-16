@@ -160,6 +160,102 @@ export async function sheetTitles(spreadsheetId: string, token: string): Promise
   return (json.sheets ?? []).map((s) => s.properties?.title).filter((t): t is string => Boolean(t))
 }
 
+/** ワークシート名の numeric sheetId + 列数(列の追加は「現在の列数から明示的に拡張」するため)。 */
+export async function sheetColumnsInfo(
+  spreadsheetId: string,
+  token: string,
+  title: string,
+): Promise<{ sheetId: number; columnCount: number }> {
+  const res = await fetch(
+    `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}?fields=sheets(properties(sheetId,title,gridProperties(columnCount)))`,
+    { headers: { authorization: `Bearer ${token}` } },
+  )
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`シートの列数取得失敗 (${res.status}): ${body.slice(0, 200)}`)
+  }
+  const json = (await res.json()) as {
+    sheets?: { properties?: { sheetId?: number; title?: string; gridProperties?: { columnCount?: number } } }[]
+  }
+  const hit = (json.sheets ?? []).find((s) => s.properties?.title === title)
+  if (!hit || typeof hit.properties?.sheetId !== 'number') throw new Error(`ワークシート "${title}" の sheetId が取得できません`)
+  return { sheetId: hit.properties.sheetId, columnCount: hit.properties.gridProperties?.columnCount ?? 0 }
+}
+
+/**
+ * ワークシートの末尾に列を `count` 本追加する(`spreadsheets:batchUpdate` の `appendDimension`)。
+ * values.update の範囲外書き込みでグリッドが自動拡張される挙動には頼らない
+ * (列数を読んでから明示的に拡張するので、書き込み位置の計算が確定する)。
+ * ヘッダー名は呼び出し側が `updateCells` で書く(この関数は構造だけ変える)。
+ *
+ * 注意: spreadsheet 単位の batchUpdate で列を増やすリクエストは `appendDimension`
+ * (`{ sheetId, dimension, length }`)。`addDimensionRange` はこの endpoint では存在しないので
+ * 400 INVALID_ARGUMENT(Unknown name "addDimensionRange")になる。
+ */
+export async function appendColumns(
+  spreadsheetId: string,
+  sa: ServiceAccountKey,
+  title: string,
+  count: number,
+): Promise<void> {
+  if (count <= 0) return
+  const token = await sheetsAccessToken(sa, SHEETS_SCOPE_EDIT)
+  const { sheetId } = await sheetColumnsInfo(spreadsheetId, token, title)
+  const res = await fetch(`${SHEETS_API}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      requests: [
+        {
+          appendDimension: {
+            sheetId,
+            dimension: 'COLUMNS',
+            length: count,
+          },
+        },
+      ],
+    }),
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`列の追加失敗 (${res.status}): ${body.slice(0, 200)}`)
+  }
+}
+
+/** 複数セルの一括書き込み(values:batchUpdate / RAW)。1リクエストの range 数上限(Google 側は 100)。 */
+export const SHEETS_BATCH_MAX = 100
+
+export interface CellWrite {
+  range: string
+  value: string
+}
+
+/**
+ * 複数のセルをまとめて書き込む(values:batchUpdate / RAW)。
+ * 連続スキャンの flush は「フラグ列 + 日時列 × N件」を1リクエストにまとめるためこれを使う。
+ * 編集スコープの token を都度取得する(読み取り側は readonly のまま)。
+ */
+export async function updateCells(
+  spreadsheetId: string,
+  sa: ServiceAccountKey,
+  writes: CellWrite[],
+): Promise<void> {
+  if (writes.length === 0) return
+  const token = await sheetsAccessToken(sa, SHEETS_SCOPE_EDIT)
+  const res = await fetch(
+    `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}/values:batchUpdate?valueInputOption=RAW`,
+    {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ data: writes.map((w) => ({ range: w.range, values: [[w.value]] })) }),
+    },
+  )
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`セルの一括書き込み失敗 (${res.status}): ${body.slice(0, 200)}`)
+  }
+}
+
 /**
  * 対象ワークシートの全値(1行目=ヘッダー)。
  * タイトルが設定と一致しない場合は最初のシートにフォールバックする(sheetTitleFor が共通根)。

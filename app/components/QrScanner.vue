@@ -16,8 +16,9 @@
 //    エラー表示を出さない。
 //  - スキャン範囲の選択(50%/25%)はスキャン→結果→スキャンの往復とリロードで維持する。
 import { libraryScanRegion, CROP_FRAC, SMALL_CROP_FRAC } from '#shared/utils/qr-scan'
+import { isSameScan } from '#shared/utils/scan'
 
-defineProps<{ disabled?: boolean }>()
+const props = defineProps<{ disabled?: boolean; busy?: boolean; continuous?: boolean }>()
 const emit = defineEmits<{ detected: [code: string] }>()
 
 const video = ref<HTMLVideoElement | null>(null)
@@ -43,11 +44,18 @@ let qrScannerClass: QrScannerClass | null = null
 let libScanner: QrScannerInstance | null = null
 // 検出後の重複コールバック(同じフレームで複数回の onDecode)を防ぐ。
 let handled = false
+// 連続モードの重複読み取り除外(同じコードを短時間で再度読んだら無視する)。
+let lastCode = ''
+let lastAt = 0
+// 連続モードの読み取り件数(記録セッションの件数とは別。読み取った回数の表示用)。
+const reads = ref(0)
 
 function statusText(): string {
-  return mode.value === 'small'
+  const base = mode.value === 'small'
     ? 'スキャン中… 中央の枠(25%)を内部で3倍拡大して照合しています'
     : 'スキャン中… 中央の枠(50%)を照合しています'
+  // 連続モードは検出しても止めない(読み取り件数を出す)
+  return props.continuous ? `${base}(連続・読み取り ${reads.value}件)` : base
 }
 
 function setMode(m: 'large' | 'small') {
@@ -116,7 +124,22 @@ async function start() {
 }
 
 function onDecode(result: { data: string }) {
-  if (!running.value || handled) return
+  if (!running.value) return
+  if (props.continuous) {
+    // 連続モード: 検出しても stop しない(次々と読む)。
+    // busy(照会・書き込み中)は積み上げない / 同じコードの短時間重複(2.5s 窓)も無視する。
+    if (props.busy) return
+    const code = result.data
+    const now = Date.now()
+    if (isSameScan(code, lastCode, lastAt, now)) return
+    lastCode = code
+    lastAt = now
+    reads.value += 1
+    status.value = statusText()
+    emit('detected', code)
+    return
+  }
+  if (handled) return
   handled = true
   stop()
   emit('detected', result.data)
