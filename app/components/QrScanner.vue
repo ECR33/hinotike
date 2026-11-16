@@ -25,6 +25,13 @@ const video = ref<HTMLVideoElement | null>(null)
 const status = ref('カメラを起動しています…')
 const error = ref<string | null>(null)
 const running = ref(false)
+// start() は await(libScanner.start()) を挟むので、同時に2回走るとインスタンスを
+// 2つ作ってしまう(二重の枠・二重のカメラ)。開始中フラグで防ぐ。
+let starting = false
+// 「スキャン停止」ボタンでの停止はユーザーの意思なので、画面を戻っても自動再開しない
+// (スキャン範囲の選択と同じく `useState` で引き継ぎ、開始ボタンで解除する)。
+// 照会モードの検出後の停止(= 結果画面へ遷移するための停止)は意思ではないので自動再開する。
+const userStopped = useState<boolean>('qr-scan-stopped', () => false)
 // スキャン範囲の選択はスキャン→結果→スキャンの往復でも維持される(共有state)。
 // localStorageにも保存し、ページリロード後や新しいセッションでも引き継ぐ。
 const mode = useState<'large' | 'small'>('qr-scan-mode', () => 'large')
@@ -44,9 +51,11 @@ let qrScannerClass: QrScannerClass | null = null
 let libScanner: QrScannerInstance | null = null
 // 検出後の重複コールバック(同じフレームで複数回の onDecode)を防ぐ。
 let handled = false
-// 連続モードの重複読み取り除外(同じコードを短時間で再度読んだら無視する)。
-let lastCode = ''
-let lastAt = 0
+// 重複読み取り除外(同じコードを短時間で再度読んだら無視する)。`useState` に置くのは
+// スキャナーの再マウント(モード切替や、結果画面から戻ったときの自動再開)で実体が
+// 作り直されるため、instance-local の lastCode/lastAt では窓がリセットされて
+// 直前のQRを再読してしまうから。
+const lastScan = useState<{ code: string; at: number }>('qr-last-scan', () => ({ code: '', at: 0 }))
 // 連続モードの読み取り件数(記録セッションの件数とは別。読み取った回数の表示用)。
 const reads = ref(0)
 
@@ -85,7 +94,9 @@ async function restartLibraryRegion() {
 
 async function start() {
   error.value = null
-  if (!video.value || running.value) return
+  if (!video.value || running.value || starting) return
+  starting = true
+  userStopped.value = false
   handled = false
   if (!qrScannerClass) {
     status.value = 'スキャンエンジン(qr-scanner)を読み込めませんでした。'
@@ -120,6 +131,8 @@ async function start() {
     running.value = false
     status.value = 'カメラを開始できませんでした。開始ボタンを押してください。'
     error.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    starting = false
   }
 }
 
@@ -131,18 +144,24 @@ function onDecode(result: { data: string }) {
     if (props.busy) return
     const code = result.data
     const now = Date.now()
-    if (isSameScan(code, lastCode, lastAt, now)) return
-    lastCode = code
-    lastAt = now
+    if (isSameScan(code, lastScan.value.code, lastScan.value.at, now)) return
+    lastScan.value = { code, at: now }
     reads.value += 1
     status.value = statusText()
     emit('detected', code)
     return
   }
   if (handled) return
+  // 照会モードも同じコードの短時間重複(2.5s 窓)は無視する。結果画面から戻ったときに
+  // 手元にある同じQRをすぐ再読すると「戻る → 即結果」の往復になってしまう(次のQRを読む
+  // ために画面を戻る、が想定動作なので)。
+  const code = result.data
+  const now = Date.now()
+  if (isSameScan(code, lastScan.value.code, lastScan.value.at, now)) return
+  lastScan.value = { code, at: now }
   handled = true
   stop()
-  emit('detected', result.data)
+  emit('detected', code)
 }
 
 async function toggleFlash() {
@@ -185,12 +204,23 @@ function stop() {
   status.value = '停止しました。開始ボタンで再開できます。'
 }
 
+/** 「スキャン停止」ボタン。ユーザーの停止なので画面を戻っても自動再開しない。 */
+function stopByUser() {
+  userStopped.value = true
+  stop()
+}
+
 // 開始ボタン押下なしで自動起動する(ブラウザの権限ダイアログのみ表示される)。
-// 自動起動が失敗した場合(ジェスチャーが必要なブラウザ等)は開始ボタンで手动開始できる。
+// 自動起動が失敗した場合(ジェスチャーが必要なブラウザ等)は開始ボタンで手動開始できる。
 onMounted(async () => {
   // 保存されたスキャン範囲を復元(結果画面から戻った後も選択が維持される)。
   const saved = localStorage.getItem('qr-scan-mode')
   if (saved === 'small' || saved === 'large') mode.value = saved
+  // 「スキャン停止」で止めたまま画面を戻ってきたら自動再開しない(開始ボタンで解除する)。
+  if (userStopped.value) {
+    status.value = '停止しました。開始ボタンで再開できます。'
+    return
+  }
   try {
     const mod = await import('qr-scanner')
     qrScannerClass = mod.default
@@ -211,6 +241,10 @@ watch(mode, (m) => {
 onBeforeUnmount(() => {
   stop()
 })
+
+// 画面を戻った後の自動再開は `app/pages/scan.vue` の route watcher が scanner の再マウントで
+// 扱う(keepalive の再 activated だけでは video の ref とライブラリの実体がズレて映像が流れない
+// ことがあった。再マウントは既存の「記録モードの切替で再マウント」と同じ導線で一貫する)。
 </script>
 
 <template>
@@ -242,7 +276,7 @@ onBeforeUnmount(() => {
       :class="{ active: flashOn }"
       @click="toggleFlash"
     >{{ flashOn ? 'ライト: ON' : 'ライト: OFF' }}</button>
-    <button v-if="running" class="btn secondary" @click="stop">スキャン停止</button>
+    <button v-if="running" class="btn secondary" @click="stopByUser">スキャン停止</button>
     <button v-else class="btn" :disabled="disabled" @click="start">スキャン開始</button>
   </div>
 </template>

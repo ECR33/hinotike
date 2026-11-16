@@ -274,18 +274,20 @@ Phase1〜4まで実装した。設計案(§2〜§5)との対応は次の通り�
 | サーバーロジック | `server/utils/scanRun.ts`(`loadScanModes`/`saveScanModes` = リストが正、履歴のあるモードの削除は400案内、code→行番号の索引キャッシュ TTL 60秒、`resolveActionColumns`、`lookupItemRow`、`checkScanCode`、`flushScan`、`createScanColumns`) |
 | API | `/api/scan-config`(GET/POST)、`/api/scan-check`、`/api/scan-flush`、`/api/scan-columns`、`/api/scan-history`(§3 の形そのまま。from/to は JST の壁時計を受け取り server が +09:00 を補う) |
 | 画面 | `app/components/QrScanner.vue`(`continuous` / `busy` props + 読み取り件数の表示)、`app/pages/scan.vue`(モードチップ・「新しい記録を作る」欄・pending card・セッションの待機列・確定ボタン、`keepalive`)、`app/pages/scan-settings.vue`(モードの追加・変更・削除・有効無効・シートの列追加。既定の2モードも DB の行なので同じように編集・削除できる)、`app/pages/records.vue`(絞り込み + seq カーソルの追記)、`app/pages/result.vue`(このコードの履歴小节)、`app/components/BottomNav.vue`(管理 dropdown に記録の設定と記録履歴) |
-| テスト | `test/unit/scan.test.ts`(33件)、`test/supabase/scan-flow.test.ts`(6件、`npm run test:local`)、`scripts/verify-scan-record.mjs`(連続投入の UI 検証)、`scripts/verify-scan-confirm.mjs`(確認モードの氏名確認→記録→即 flush の UI 検証)、`scripts/verify-scan-settings.mjs`(設定の増減・変更・削除と導線の UI 検証。シートに列を書かない) |
+| テスト | `test/unit/scan.test.ts`(35件)、`test/supabase/scan-flow.test.ts`(6件、`npm run test:local`)、`scripts/verify-scan-record.mjs`(連続投入の UI 検証)、`scripts/verify-scan-confirm.mjs`(確認モードの氏名確認→記録→即 flush の UI 検証)、`scripts/verify-scan-settings.mjs`(設定の増減・変更・削除と導線の UI 検証。シートに列を書かない)、`scripts/verify-scan-return.mjs`(照会→結果→「スキャンに戻る」の自動再開と、ユーザーの停止は再開しないことの UI 検証。シートに一切書かない) |
 
 設計案から実際に寄せた点:
 
 - **証跡の不変性**: `scan_events` に authenticated の update/delete ポリシーを作らない。PostgREST は RLS で弾かれた update/delete を error にせず「0件」で返すので、テストは値が変わらないことで不変性を確認している。
 - **履歴の分页**: `seq` 降順のキーセットカーソル(offset と違い、絞り込みを変えても先頭がずれない)。
-- **連続スキャンの重複**: スキャン側(`isSameScan`, 2.5秒)とモードの `dedupe`(warn/skip/allow)の2段。確認モードの「上書き」だけ `overwrite` を送る。
+- **連続スキャンの重複**: スキャン側(`isSameScan`, 2.5秒)とモードの `dedupe`(warn/skip/allow)の2段。確認モードの「上書き」だけ `overwrite` を送る。直前の読み取りは `useState('qr-last-scan')` に置くので、スキャナーを再マウントしても窓がリセットされない(= 照会モードで結果画面から戻った直後に手元の同じQRを再読しない)。
 - **シート索引のキャッシュ**: 読み取り専用的な check を連続で叩くとシートを毎回読みになるため、コード→行番号の索引をプロセス内キャッシュ(TTL 60秒)。列追加後は捨てる。
 - **既定の2モードは「コードに埋めた値」ではなく DB の行**: シードはマイグレーションの insert なので、他のモードと同じように編集・削除できる。`scan_modes` が空のときだけ `DEFAULT_SCAN_MODES` を画面に表示し(`rowMissing=true`)、保存で行を作る。
 - **設定の導線**: `/scan-settings`(一覧・変更・削除・列追加)を追加し、`/scan` のモード行・`/records`・bottom nav の管理 dropdown から到達できる。`/scan` の「新しい記録を作る」欄も残す(その場で運用を始められる導線)。
 - **列の不足を先に伝える**: `GET/POST /api/scan-config` はシートの実ヘッダー(`sheetHeaders`)も返す(読み取り失敗・未設定は `null`。SSR がシート読み取りの失敗で落ちないようにする)。`/scan-settings` は欠け列と「シートのヘッダーにありません」+ 列追加ボタンを出し、`/scan` は選択中のモードの欠け列を error で出す(flush の 400 をスキャンしてから教えない)。
+- **照会 → 結果 → 「スキャンに戻る」は自動再開する**(運用の修正): 照会モードは検出1回で `stop()` して `/result` へ遷移し、`/scan` は keepalive で生存するため、戻るとカメラが止まったまま(「スキャン開始」を再度押す)だった。§1 の運用(照会→結果の確認→次のQR)に反するので、戻ったら `remountScanner()` で再マウントし自動再開する。遷移は `router.afterEach` で拾う(`useRoute()` を `watch` すると keepalive のページでは発火しない — 実測で戻り後に走らなかった)。「スキャン停止」ボタンの停止はユーザーの意思なので `useState('qr-scan-stopped')` で引き継ぎ、戻っても自動再開しない。§5 の「照会モードは1読み取りごとに stop」はそのまま(止まること自体は仕様、**戻ったときに再開する**のが追加)。
 - **未実装(任意 Phase)**: オフラインの待機列、記録の CSV エクスポート。連続スキャンの誤読はシートにそのまま残るため、終了時に `/records` で確認する運用(§7)をそのまま推奨する。
 
 検証の実測結果(ローカル Supabase + dev シート): 読み取り側(`VERIFY_SCAN_FLUSH` 未使用)は「チケット配布」モードで 1004 → 1018 → 1023 を順に流すと読み取り3件・未確定3件が待機列に氏名で並び、同じQRの窓内再読は積み上がらない(件数が3件のまま)。シート側(`VERIFY_SCAN_FLUSH=1`)は 3件を `配布済`(列 AT)に書き、`scan_events` に `ok` と `'フォームの回答 1'!AT6` 等の range が残り、`/api/scan-check` の状態が `済` / `recordedAt` が `2026-11-16 11:40 (JST)` になることを確認した(dev シートの列 配布済/配布日時/来場済/来場日時 は `/scan-settings` の「シートの列を追加」で実作成: ヘッダー45→49、`include_columns` 17→21)。確認側は「チェックイン」で 1018 を読み取り → pending card に氏名 → 「記録」で即 flush → 状態 `済` / `/records` に チェックイン の履歴。**実測で2つ直した**: (a) 列追加のリクエスト名(`addDimensionRange` は spreadsheet 単位の batchUpdate に無い → `appendDimension`)、(b) 確認モードの flush タイミング(5件閾値だけで即 flush していなかった)。flush は dev シートに 配布済/配布日時 と 来場済/来場日時 を書くので、本番データに対しては実行しない。
 設定画面の実測(`scripts/verify-scan-settings.mjs`): 使い捨てのモードを作成(シートに列を書かない)→ `/scan` のチップに現れる → 改名と重複の扱い(`allow`)が DB に反映される → 削除で行が消える → `/scan`・`/records`・bottom nav の dropdown から設定画面へ到達できる。既定プリセットの2モードは消えない。欠け列の注記(`/scan-settings` の「シートのヘッダーにありません」、`/scan` の「このモードの列がシートにありません」)も実際に出ることを確認した。
+戻り後の自動再開の実測(`scripts/verify-scan-return.mjs`): 照会モードで 1004 を読む → `/result?code=1004` → 「スキャンに戻る」→ 開始ボタンを押さずに「スキャン中」の表示と映像が戻る(再マウント+自動開始)→ 戻った直後に同じ 1004 を2秒映しても `/scan` のまま(窓内の再読は無視)→ 別の 1018 はそのまま `/result?code=1018` になる → 「スキャン停止」で止めて画面を戻っても「停止しました。開始ボタンで再開できます。」のまま(ユーザーの停止を尊重)。この検証はシートへ一切書かない(照会のみ)。

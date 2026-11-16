@@ -46,6 +46,22 @@ function remountScanner() {
   scannerKey.value += 1
 }
 
+// keepalive の /scan は `/result`(照会結果)に開いても生存する。照会モードは検出1回で
+// スキャナーを stop して結果画面へ遷移するので、**戻ったら再マウントして自動再開する**
+// (`/result` の「スキャンに戻る」→ 次のQRをそのまま読みたい。開始ボタンをもう1回押させるのは
+//  照会→結果の往復ごとにタップが増えるので運用に反する)。
+// ユーザーが「スキャン停止」で止めた場合は QrScanner 側が `useState('qr-scan-stopped')` で
+// 意思を引き継ぐので、再マウントしても開始ボタンが必要なまま(自動再開しない)。
+//
+// `useRoute()` は keepalive のページでは「そのページが生成されたときの route」が残るので
+// watcher では遷移を拾えない(実測で発火せず)。router の afterEach(グローバルな遷移後のhook)で
+// 拾い、ページが unmount されたら解除する。
+const router = useRouter()
+const offAfterEach = router.afterEach((to, from) => {
+  if (to.path === '/scan' && from && from.path !== '/scan') remountScanner()
+})
+onBeforeUnmount(() => offAfterEach())
+
 const session = useState<SessionEntry[]>('scan-session', () => [])
 const pending = useState<ScanCheckResponse | null>('scan-pending', () => null)
 const busy = ref(false)
