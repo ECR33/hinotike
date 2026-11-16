@@ -35,10 +35,16 @@ const failures = []
 if (!ghAvailable()) {
   failures.push('gh CLI が認証されていない(`gh auth login` か GH_TOKEN が必要)')
 } else {
-  const runs = JSON.parse(sh(['run', 'list', '--workflow', WORKFLOW, '--limit', '3', '--json', 'databaseId,headSha,conclusion,status,createdAt,url']))
-  const mine = runs.filter((r) => r.headSha === head)
+  let mine = []
+  // push 直後はジョブが一覧に出ないので、見つかるまで少し待つ(--wait の有無に関係なく)
+  for (let tries = 0; tries < 12; tries++) {
+    const runs = JSON.parse(sh(['run', 'list', '--workflow', WORKFLOW, '--limit', '3', '--json', 'databaseId,headSha,conclusion,status,createdAt,url']))
+    mine = runs.filter((r) => r.headSha === head)
+    if (mine.length > 0) break
+    await new Promise((r) => setTimeout(r, 5000))
+  }
   if (mine.length === 0) {
-    failures.push(`HEAD(${head.slice(0, 7)})の deploy ジョブが見つからない → push されていないか、まだ走っていない`)
+    failures.push(`HEAD(${head.slice(0, 7)})の deploy ジョブが見つからない(60秒待っても出ない) → push されていないか、workflow が走っていない`)
   } else {
     let run = mine[0]
     if (wait && run.status !== 'completed') {
@@ -46,7 +52,7 @@ if (!ghAvailable()) {
       while (run.status !== 'completed' && tries < 30) {
         await new Promise((r) => setTimeout(r, 5000))
         tries += 1
-        run = JSON.parse(sh(['run', 'view', String(run.databaseId), '--json', 'databaseId,conclusion,status,url']))
+        run = JSON.parse(sh(['run', 'view', String(run.databaseId), '--json', "databaseId,conclusion,status,url,createdAt"]))
       }
     }
     console.log(`deploy job: ${run.status} / ${run.conclusion} (${run.createdAt}) ${run.url}`)
