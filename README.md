@@ -207,6 +207,7 @@ Workers + Assets としてデプロイする。`nodejs_compat` を有効にす�
   - vars: `NUXT_PUBLIC_SUPABASE_URL`(例 `https://<project-ref>.supabase.co`)、`NUXT_PUBLIC_APP_URL`(本番ホスト)
   - secrets: `NUXT_PUBLIC_SUPABASE_KEY`(publishable key で可)、`CF_API_TOKEN`(Workers を deploy できる権限の token)、`CF_ACCOUNT_ID`
   Actions から `wrangler secret put` はしない(鍵 JSON を Actions に載せないため)。
+- **定例のデプロイ(毎回手順を探さないための固定手順)**: 本番デプロイは `main` への push で Actions が走るので、必要な操作は「commit → push → 確認」の3つだけ。ローカルで `npm run deploy:cf` は実行しない(ローカルの wrangler ログインは期限切れになる上、CI が同じ commit をビルドして deploy 済みなので二重になる)。確認は `npm run deploy:status`(`scripts/deploy-status.mjs`: HEAD の SHA と `deploy.yml` のジョブを照合し、本番の `/api/health` を叩いて `OK(HEAD <sha> が本番に反映済み)` を出す)。ジョブが走っている間は `npm run deploy:status --wait` で待つ。ジョブが失敗したときは `gh run list --workflow=deploy.yml --limit 3` → `gh run view <id> --log`(ログが取れない環境では run の URL を開く)。DB のマイグレーション差分は `npx supabase migration list --remote=gfcqidgvrtxxosthulna` で確認し、差分があれば `npx supabase db push --remote=gfcqidgvrtxxosthulna --yes`(履歴のズレは `npx supabase migration repair 0001..0005 --status applied --remote=gfcqidgvrtxxosthulna --yes` で揃える)。Workers の Secret(`GOOGLE_SERVICE_ACCOUNT_JSON`)と同期設定(`sync_settings.spreadsheet_id`)はダッシュボード側なのでこのスクリプトは確認しない(必要なら `npx wrangler login` → `npx wrangler secret list`)。
 - 配信ドメイン: 本番ホストは `https://hinotike.hinogakuenpta.org`。Cloudflare ダッシュボードの Workers →
   `hinotike` → Settings → Custom domains に追加する(DNS レコードは自動作成される)。
   同じホストを `wrangler.jsonc` の `vars.NUXT_PUBLIC_APP_URL` と GitHub の vars `NUXT_PUBLIC_APP_URL` に書く。

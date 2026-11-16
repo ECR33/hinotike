@@ -20,7 +20,8 @@
     "supabase:start": "supabase start",
     "supabase:stop": "supabase stop",
     "supabase:reset": "supabase db reset",
-    "supabase:dev-user": "node scripts/create-dev-user.mjs"
+    "supabase:dev-user": "node scripts/create-dev-user.mjs",
+    "deploy:status": "node scripts/deploy-status.mjs"
   },
   "dependencies": {
     "@nuxtjs/supabase": "^2.0.9",
