@@ -8,7 +8,7 @@ import {
   scanModeFromDb,
   scanModeToDb,
   normalizeScanModes,
-  recordState,
+  stateOfPayload,
   type ScanMode,
   type ScanRecordEntry,
   type ScanStatus,
@@ -272,18 +272,8 @@ export async function lookupItemRow(
   return out
 }
 
-/** payload から済/未と記録日時を出す(モードの payload キーを使う)。 */
-export function stateOfPayload(payload: Record<string, unknown>, mode: ScanMode): { state: '済' | '未'; recordedAt: string } {
-  let state: '済' | '未' = '未'
-  let recordedAt = ''
-  for (const action of mode.actions) {
-    const one = recordState(payload, action.payloadKey, action.payloadAtKey)
-    if (one === '済') state = '済'
-    const at = payload[action.payloadAtKey]
-    if (typeof at === 'string' && at.trim() && !recordedAt) recordedAt = at.trim()
-  }
-  return { state, recordedAt }
-}
+// stateOfPayload(payload から済/未と記録日時を出す)は #shared/utils/scan に集約した
+// (オフラインのローカル check と同じ根で済/未を出すため)。
 
 /** check(読み取り専用)。items → シート行 → 現在の状態。書き込まない。 */
 export async function checkScanCode(
@@ -312,6 +302,12 @@ export interface ScanFlushInput {
   code: string
   /** 重複を上書きする(画面の「上書き」ボタンのぶん。dedupe='skip' は上書きしない) */
   overwrite?: boolean
+  /**
+   * この読み取りの時刻(ISO)。オフライン記録の復旧確定では **オフライン時のスキャン日時** を送る
+   * (シートの日時セル・証跡 scan_events.at に載る。不正/省略は確定時刻にフォールバック)。
+   * オンラインの scan-flush は送らない(従来どおり確定時刻)。
+   */
+  at?: string
 }
 
 export interface ScanFlushResult {
@@ -370,18 +366,30 @@ export async function flushScan(
   const overwriteSet = new Set(inputs.filter((i) => i.overwrite === true).map((i) => i.code.trim()))
   if (codes.length === 0) return { results: [], wrote: 0, dbUpdated: true, sheetTitle: '' }
 
+  // per-entry の読み取り時刻(オフライン記録の復旧確定用)。不正・省略は確定時刻にフォールバックする。
+  const fallbackAtIso = new Date().toISOString()
+  const cleanInputs = inputs
+    .map((i) => ({
+      code: i.code.trim(),
+      overwrite: i.overwrite === true,
+      at: typeof i.at === 'string' && Number.isFinite(Date.parse(i.at)) ? i.at : fallbackAtIso,
+    }))
+    .filter((i) => i.code)
+    .slice(0, SCAN_CODES_MAX)
+
   const index = await loadSheetIndex(event, settings)
   const cells = resolveActionColumns(mode, index)
   const items = await lookupItemRow(event, codes)
-  const atJst = formatJst(new Date().toISOString())
-  const atIso = new Date().toISOString()
 
   const results: ScanRecordEntry[] = []
   const writes: CellWrite[] = []
   const payloadUpdates: { code: string; payload: Record<string, unknown> }[] = []
   const eventRows: { code: string; name: string | null; status: ScanStatus; written: Record<string, string>; range: string | null; at: string }[] = []
 
-  for (const code of codes) {
+  for (const input of cleanInputs) {
+    const code = input.code
+    const atIso = input.at
+    const atJst = formatJst(atIso)
     const row = items.get(code)
     const name = row?.name ?? null
     if (!row && mode.requireFound) {

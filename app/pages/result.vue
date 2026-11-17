@@ -3,6 +3,7 @@
 
 import { isQuantityKey, ITEM_GROUP_KEY, ITEM_NAME_KEY, ITEM_REMARK_KEY, ITEM_YEAR_KEY, payloadValue, quantityName, REMARK_MAX_LENGTH } from '#shared/utils/items'
 import { formatJst, scanStatusMessage, type ScanHistoryResponse } from '#shared/utils/scan'
+import type { OfflineMeta } from '#shared/utils/offline'
 
 const route = useRoute()
 const code = computed(() => String(route.query.code ?? ''))
@@ -21,6 +22,9 @@ type RemarkUpdateResponse = {
 // SSR の内部 fetch は cookie を自動では持たないため useRequestHeaders で明示転送する。
 const result = useState<LookupResult | null>('lookup-result', () => null)
 const errorMessage = useState<string | null>('lookup-error', () => null)
+// オフラインフォールバック照会(/api/lookup が失敗し、オフラインモードが有効ならローカルスナップショットで照会する)
+const offlineLookup = useState<boolean>('lookup-offline', () => false)
+const offlineMeta = useState<OfflineMeta | null>('lookup-offline-meta', () => null)
 
 async function fetchLookup(c: string) {
   try {
@@ -30,7 +34,21 @@ async function fetchLookup(c: string) {
       headers: useRequestHeaders(['cookie']),
     })
     errorMessage.value = null
+    offlineLookup.value = false
+    offlineMeta.value = null
   } catch (e: unknown) {
+    // オフラインモードでは /api/lookup の失敗をローカルスナップショットの照会にフォールバックする
+    // (地下での「照会」。SSR は storage を読めないのでこの経路は client の遷移のみ)。
+    const meta = readOfflineMetaFromStorage()
+    if (meta?.enabled) {
+      const row = await offlineGetItem(c).catch(() => undefined)
+      // payloadValue 等は Record<string, unknown> で読む(items-list の行と同じ形。index signature の cast は行データの既知の形に対する安全な widening)
+      result.value = { found: row !== undefined, code: c, row: row ? (row as unknown as Record<string, unknown>) : null }
+      offlineLookup.value = true
+      offlineMeta.value = meta
+      errorMessage.value = null
+      return
+    }
     errorMessage.value = e instanceof Error ? e.message : String(e)
   }
 }
@@ -63,6 +81,12 @@ async function fetchHistory(c: string) {
   if (!c) {
     history.value = null
     historyFor.value = ''
+    return
+  }
+  // オフラインモード中は履歴(/api/scan-history)を通信しない(照会本体はローカルフォールバックで出る)。
+  if (readOfflineMetaFromStorage()?.enabled) {
+    history.value = null
+    historyFor.value = c
     return
   }
   try {
@@ -319,6 +343,9 @@ function formatImportedAt(iso: string): string {
     <div v-else-if="result && !result.found" class="card result-card result-empty">
       <p class="result-code">コード {{ code }}</p>
       <p class="result-empty-text">該当するデータが見つかりませんでした。</p>
+      <p v-if="offlineLookup" class="muted offline-note">
+        オフラインのスナップショット({{ offlineMeta?.itemCount ?? 0 }}件・準備 {{ formatJst(offlineMeta?.snapshotAt ?? '') }})の中にもありません。
+      </p>
     </div>
 
     <div v-else-if="result?.row" class="card result-card">
@@ -330,6 +357,11 @@ function formatImportedAt(iso: string): string {
         </div>
         <p class="result-code">コード {{ result.code }}</p>
       </div>
+
+      <!-- オフラインフォールバック照会: スナップショットからの照会である旨と、履歴・備考編集がオンライン限定であることを注記する -->
+      <p v-if="offlineLookup" class="muted offline-note">
+        オフラインのスナップショットから照会しました(準備 {{ formatJst(offlineMeta?.snapshotAt ?? '') }} / {{ offlineMeta?.itemCount ?? 0 }}件)。スキャン履歴と備考の編集は通信が復旧してから利用できます。
+      </p>
 
       <!-- 金額・支払いのまとまり(1つの枠に3セル) -->
       <div v-if="money.length" class="panel money-panel" :class="money.length === 3 ? 'three' : 'two'">
@@ -382,7 +414,8 @@ function formatImportedAt(iso: string): string {
             </dd>
             <dd v-else-if="key === ITEM_REMARK_KEY">
               <span>{{ value }}</span>
-              <button class="btn secondary remark-edit-btn" type="button" @click="startRemarkEdit">編集</button>
+              <!-- オフライン照会では備考の編集(/api/remark-update)できない(ボタンを出さない) -->
+              <button v-if="!offlineLookup" class="btn secondary remark-edit-btn" type="button" @click="startRemarkEdit">編集</button>
             </dd>
             <dd v-else>{{ value }}</dd>
           </div>
@@ -482,6 +515,11 @@ function formatImportedAt(iso: string): string {
 
 .result-note {
   margin: 0;
+}
+
+.offline-note {
+  margin: 6px 0 0;
+  font-size: 12px;
 }
 
 /* まとめ枠(金額・商品)。パネルより一段暗い面で枠線を出す */

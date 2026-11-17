@@ -13,11 +13,14 @@ export default defineNuxtConfig({
   // クライアント/サーバーの cookie 運用を1系統に統一し、自前 browser client は使わない。
   modules: ['@nuxtjs/supabase', '@vite-pwa/nuxt'],
 
-  // PWA: @vite-pwa/nuxt(generateSW)。方針は「インストール可能+アプリシェルキャッシュのみ」。
-  // - precache はビルドの静的資産のみ(ワークボックス既定)。
-  // - navigateFallback:null — SSRページ(/, /scan, /items…)はネットワーク必須なので
-  //   SWでオフラインフォールバックを返さない(オフライン時は素直に通信エラーになる)。
-  // - API(/api/*, Supabase)はキャッシュしない(認証付き動的データ)。
+  // PWA: @vite-pwa/nuxt(generateSW)。方針は「インストール可能+アプリシェルキャッシュ+オフラインページ」。
+  // - precache はビルドの静的資産(ワークボックス既定)。SPA 遷移(/scan→/result の JS チャンク)は
+  //   precache でオフラインでも開く(/result の照会オフラインはローカルスナップショットにフォールバック)。
+  // - navigateFallback:null — SSRページ(/, /scan, /items)は NetworkFirst の runtimeCaching で端末ごとに缓存し、
+  //   通信失敗(地下)のときだけ缓存をフォールバックで返す。オンラインでは素直に SSR が返る
+  //   (認証付き HTML は混ざらない端末ローカル cache に置くだけ)。
+  // - API(/api/*, Supabase)はキャッシュしない(認証付き動的データ。オフラインのデータは
+  //   /scan の「オフラインモード準備」が IndexedDB にダウンロードする)。
   // - dev ではSW無効(モジュール既定)。本番 build のみ登録。
   pwa: {
     // SW 登録はモジュールの autoRegister(vite-plugin-pwa の virtual:registerSW が client に注入される)。
@@ -44,6 +47,21 @@ export default defineNuxtConfig({
     },
     workbox: {
       navigateFallback: null,
+      // オフラインモード用ページキャッシュ: / と /scan は NetworkFirst(SSR の認証付き HTML を端末ローカルに缓存し、
+      // 地下などの通信失敗/タイムアウト時だけ缓存を返す)。/result・/items は SPA 遷移で開くので
+      // precache された JS チャンクで動き、HTML の缓存は不要(/result はローカル照会にフォールバックする)。
+      // pattern は URL の末尾が / か /scan のものだけ(API path には当たらない)。
+      runtimeCaching: [
+        {
+          urlPattern: /\/(?:|items|scan)$/,
+          handler: 'NetworkFirst',
+          options: {
+            cacheName: 'hinotike-pages',
+            networkTimeoutSeconds: 3,
+            cacheableResponse: { statuses: [200] },
+          },
+        },
+      ],
     },
   },
 

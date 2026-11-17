@@ -386,6 +386,19 @@ export function historyNextCursor(rows: ScanHistoryRow[], limit: number): string
   return typeof last === 'number' ? String(last) : null
 }
 
+/** payload から済/未と記録日時を出す(モードの payload キーを使う)。server の scanRun と画面(オフライン check)で共通。 */
+export function stateOfPayload(payload: Record<string, unknown>, mode: ScanMode): { state: '済' | '未'; recordedAt: string } {
+  let state: '済' | '未' = '未'
+  let recordedAt = ''
+  for (const action of mode.actions) {
+    const one = recordState(payload, action.payloadKey, action.payloadAtKey)
+    if (one === '済') state = '済'
+    const at = payload[action.payloadAtKey]
+    if (typeof at === 'string' && at.trim() && !recordedAt) recordedAt = at.trim()
+  }
+  return { state, recordedAt }
+}
+
 /** 記録の status を画面用の文言に落とす(固定文言。内部メッセージは出さない)。 */
 export function scanStatusMessage(status: ScanStatus): string {
   if (status === 'ok') return '記録しました'

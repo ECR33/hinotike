@@ -12,6 +12,20 @@
 // - 「新しい記録を作る」でモードとシート列をその場で作れる(動的増減)
 import type { ScanCheckResponse, ScanConfigResponse, ScanDedupe, ScanFlushResponse, ScanMode, ScanRecordEntry } from '#shared/utils/scan'
 import { formatJst, modeColumnsMissing, scanModeSummary, scanStatusMessage, SCAN_AUTO_FLUSH_COUNT, SCAN_FLAG_VALUE } from '#shared/utils/scan'
+import type { OfflineItemRow } from '~/utils/offlineStore'
+import type { OfflineFlushResponse, OfflineMeta, OfflineQueueEntry } from '#shared/utils/offline'
+import { makeOfflineQueueId, offlineScanCheckResponse, OFFLINE_FLUSH_CHUNK, OFFLINE_ITEM_MAX, OFFLINE_PAGE_BATCH, OFFLINE_QUEUE_MAX } from '#shared/utils/offline'
+import { parseRegistrationCode } from '#shared/utils/registration'
+
+/**
+ * オフラインモード(地下など電波状況の悪い場所でのスキャン・照会・チェックイン):
+ * - 「オフラインモード準備」で items 全件 + scan-config を IndexedDB にダウンロードし、
+ *   localStorage に有効化フラグを置く(SSR は storage を読めないので初回描画は「無効」。onMounted で有効化する)。
+ * - オフライン中の記録は /api/scan-check を叩かずローカル payload で照合し、読み取りを IndexedDB の
+ *   キューにためる(画面を閉じても残る)。シートへの書き込みは復旧後の「オフラインの記録を確定」で行う。
+ * - オフライン中の照会(照会モード)は /result へ SPA 遷移し、/result がローカルスナップショットで照会する
+ *   (SW が precache した JS チャンクで開くため HTML のネットワークは不要)。
+ */
 
 definePageMeta({ keepalive: true, scrollToTop: false })
 
@@ -21,6 +35,8 @@ interface SessionEntry extends ScanRecordEntry {
   queued: boolean
   /** 確認モードで「上書き」を選んだなら flush に overwrite: true を送る */
   overwrite: boolean
+  /** オフライン読み取りでローカルキュー(IndexedDB)にためたぶん。復旧後に /api/scan-offline-flush で確定する */
+  offlineQueued?: boolean
 }
 
 const configState = useState<ScanConfigResponse | null>('scan-config', () => null)
@@ -67,6 +83,21 @@ const pending = useState<ScanCheckResponse | null>('scan-pending', () => null)
 const busy = ref(false)
 const errorMessage = ref<string | null>(null)
 const flushNote = ref<string | null>(null)
+const offlineNote = ref<string | null>(null)
+// 復旧確定(/api/scan-offline-flush)の失敗用。セッション欄の errorMessage と分ける(照会モードでもBannerに出せるようにする)
+const queueError = ref<string | null>(null)
+
+// オフラインモードの状態(useOfflineState は onMounted で localStorage のメタ + IndexedDB のキュー件数を引き当てる。
+// top-level に分解するので template の自動 unwrap が効く)。
+const { meta: offlineMeta, queueCount: offlineQueueCount, enabled: offlineEnabled, refreshQueueCount } = useOfflineState()
+// スナップショット有効時は SSR 缓存の旧設定より準備時のスナップショットを優先する(モードチップと欠け列注記の根)。
+onMounted(() => {
+  if (offlineMeta.value?.enabled) configState.value = offlineMeta.value.config
+})
+/** 読み取りごとに localStorage を sync で読む(判定を onMounted 状態に依存しないため)。SSR では null = 無効。 */
+function offlineActive(): boolean {
+  return readOfflineMetaFromStorage()?.enabled === true
+}
 
 function selectMode(mode: ScanMode | null) {
   selectedModeId.value = mode?.id ?? null
@@ -92,6 +123,7 @@ function pushEntry(entry: SessionEntry) {
 async function onDetected(code: string) {
   const mode = activeMode.value
   if (!mode) {
+    // 照会モード: オフラインでも /result へ SPA 遷移する(SW の precache で JS が読め、/result がローカル照会にフォールバックする)
     navigateTo(`/result?code=${encodeURIComponent(code)}`)
     return
   }
@@ -99,6 +131,60 @@ async function onDetected(code: string) {
   busy.value = true
   errorMessage.value = null
   try {
+    // オフラインモード: /api/scan-check を叩かずローカルスナップショット(payload)で照合する。
+    // シート行の存在(sheet_missing)はオフラインでは判定できない(payload を鏡として扱う)。復旧後の flush で確定する。
+    if (offlineActive()) {
+      if (mode.id === null) {
+        errorMessage.value = 'オフラインではまだ保存されていないモードを記録できません(先に「記録の設定」で保存してください)'
+        return
+      }
+      if (parseRegistrationCode(code)) {
+        errorMessage.value = '利用者登録用のQRです(記録対象のチケットコードをスキャンしてください)'
+        return
+      }
+      const row = await offlineGetItem(code).catch(() => undefined)
+      const checked = offlineScanCheckResponse(mode.id, mode, code, row?.payload ?? null, new Date().toISOString())
+      if (mode.confirmBeforeRecord) {
+        // 確認モード(チェックイン): オフラインでも氏名と現在の状態を出してから確定する(安全弁はオンラインと同じ)
+        pending.value = checked
+        return
+      }
+      // 連続モード: オンラインと同じく ok のぶんだけを待機積みにする(duplicate/skip は表示のみ)
+      const queued = checked.status === 'ok'
+      pushEntry({
+        code: checked.code,
+        status: queued ? 'ok' : checked.status,
+        name: checked.name,
+        written: {},
+        range: null,
+        at: checked.at,
+        queued,
+        overwrite: false,
+        offlineQueued: queued,
+      })
+      if (queued) {
+        if (offlineQueueCount.value >= OFFLINE_QUEUE_MAX) {
+          errorMessage.value = `オフラインの待機記録が上限(${OFFLINE_QUEUE_MAX}件)に達しました。通信が復旧したら確定してください`
+        } else {
+          await offlineAddQueueEntry({
+            id: makeOfflineQueueId(mode.id, checked.code, checked.at),
+            modeId: mode.id,
+            modeName: mode.name,
+            code: checked.code,
+            status: 'ok',
+            name: checked.name,
+            overwrite: false,
+            at: checked.at,
+          })
+          await refreshQueueCount()
+          // オンラインの自動flush閾値は通信するが、オフライン中は通信しない(ローカル蓄積の注記だけ出す)
+          if (session.value.filter((e) => e.offlineQueued).length >= SCAN_AUTO_FLUSH_COUNT) {
+            offlineNote.value = 'オフライン中: 読み取りをローカルにためています(通信が復旧したら「オフラインの記録を確定」でまとめてシートへ書き込みます)'
+          }
+        }
+      }
+      return
+    }
     const checked = await $fetch<ScanCheckResponse>('/api/scan-check', { method: 'POST', body: { modeId: mode.id, code } })
     if (mode.confirmBeforeRecord) {
       // 確認モード: 氏名と現在の状態を出してから確定する(誤読の安全弁)
@@ -140,6 +226,11 @@ function describeError(e: unknown): string {
 
 /** 未確定の読み取りをまとめてシートへ書く(/api/scan-flush)。 */
 async function flush() {
+  // オフライン中は通信しない(ローカルキューにためて、復旧後に「オフラインの記録を確定」で書く)
+  if (offlineActive()) {
+    offlineNote.value = 'オフライン中はシートに書き込みません(通信が復旧したら「オフラインの記録を確定」でまとめて書き込みます)'
+    return
+  }
   const mode = activeMode.value
   const queuedEntries = session.value.filter((e) => e.queued)
   if (!mode || queuedEntries.length === 0) return
@@ -173,10 +264,12 @@ async function flush() {
   }
 }
 
-/** 確認モードの確定(記録 / 上書き / 見送り)。 */
+/** 確認モードの確定(記録 / 上書き / 見送り)。オフラインはローカルキューにためて復旧後に確定する。 */
 function confirmRecord(overwrite: boolean) {
   const p = pending.value
   if (!p) return
+  const mode = activeMode.value
+  const offlineMode = offlineActive()
   const status: ScanRecordEntry['status'] = p.status === 'duplicate' ? 'duplicate' : 'ok'
   pushEntry({
     code: p.code,
@@ -187,9 +280,26 @@ function confirmRecord(overwrite: boolean) {
     at: p.at,
     queued: true,
     overwrite,
+    offlineQueued: offlineMode,
   })
   pending.value = null
   remountScanner()
+  if (offlineMode) {
+    if (mode?.id != null) {
+      void offlineAddQueueEntry({
+        id: makeOfflineQueueId(mode.id, p.code, p.at),
+        modeId: mode.id,
+        modeName: mode.name,
+        code: p.code,
+        status: 'ok', // 復旧後の flush 側で現在の状態から ok/duplicate/skipped を再確定する
+        name: p.name,
+        overwrite,
+        at: p.at,
+      }).then(() => refreshQueueCount())
+    }
+    offlineNote.value = 'オフライン: 氏名を確認してローカルに記録しました(通信が復旧したら「オフラインの記録を確定」でシートへ書き込みます)'
+    return
+  }
   // 確認モードは「確認ボタンで1件を確定する」運用なので、その場で flush する
   // (5件ためる連続モードの閾値だと、確認したのにシートに書されない状態になる)。
   if (activeMode.value?.confirmBeforeRecord || session.value.filter((e) => e.queued).length >= SCAN_AUTO_FLUSH_COUNT) {
@@ -200,6 +310,163 @@ function confirmRecord(overwrite: boolean) {
 function dismissPending() {
   pending.value = null
   remountScanner()
+}
+
+// ── オフラインモードの準備・解除・復旧確定 ──────────────
+
+const prepBusy = ref(false)
+const prepProgress = ref('')
+const prepError = ref<string | null>(null)
+
+/**
+ * オフラインモード準備: scan-config + items-list の分页を最後まで読み、IndexedDB に保存して
+ * localStorage のフラグを ON にする。SW の NetworkFirst にもページ(/ と /scan)の HTML をためる
+ * (fetch は SW がinterceptするので、準備時に1回読むだけでオフライン起動できる)。
+ */
+async function prepareOffline() {
+  if (prepBusy.value) return
+  prepBusy.value = true
+  prepError.value = null
+  offlineNote.value = null
+  prepProgress.value = '設定を読み込み中…'
+  try {
+    const cfg = await $fetch<ScanConfigResponse>('/api/scan-config')
+    configState.value = cfg
+    const rows: OfflineItemRow[] = []
+    let cursor = ''
+    let capped = false
+    for (;;) {
+      const page = await $fetch<{ rows: OfflineItemRow[]; nextCursor: string | null; total: number }>('/api/items-list', {
+        query: { limit: OFFLINE_PAGE_BATCH, ...(cursor ? { cursor } : {}) },
+      })
+      rows.push(...page.rows)
+      prepProgress.value = `${rows.length}/${page.total ?? rows.length}件 をダウンロード中…`
+      if (!page.nextCursor) break
+      if (rows.length >= OFFLINE_ITEM_MAX) {
+        capped = true
+        break
+      }
+      cursor = page.nextCursor
+    }
+    const meta: OfflineMeta = {
+      enabled: true,
+      snapshotAt: new Date().toISOString(),
+      itemCount: rows.length,
+      config: cfg,
+      capped,
+    }
+    await offlineSaveSnapshot(meta, rows)
+    writeOfflineMetaToStorage(meta)
+    offlineMeta.value = meta
+    await refreshQueueCount()
+    // オフライン起動用のページキャッシュをためる(SW が NetworkFirst で缓存。dev では SW が無いので素通し)
+    await fetch('/scan').catch(() => {})
+    await fetch('/').catch(() => {})
+    await fetch('/items').catch(() => {})
+    offlineNote.value = `オフライン準備完了(${rows.length}件${capped ? `、上限 ${OFFLINE_ITEM_MAX}件で打ち切り` : ''}・設定 ${cfg.modes.length}モード)。地下でもスキャン・照会・チェックイン・items一覧が使えます。`
+  } catch (e: unknown) {
+    prepError.value = describeError(e)
+  } finally {
+    prepBusy.value = false
+    prepProgress.value = ''
+  }
+}
+
+/** オフライン解除: フラグだけ OFF(スナップショットとキューは残る。再準備で更新できる)。 */
+function disableOffline() {
+  const m = offlineMeta.value
+  if (!m) return
+  const next: OfflineMeta = { ...m, enabled: false }
+  writeOfflineMetaToStorage(next)
+  offlineMeta.value = next
+}
+
+/** スナップショット削除(items + meta)。オフラインの待機記録は復旧確定できるので残す。 */
+async function deleteOfflineData() {
+  try {
+    await offlineDeleteSnapshot()
+  } catch (e: unknown) {
+    prepError.value = describeError(e)
+    return
+  }
+  clearOfflineMetaStorage()
+  offlineMeta.value = null
+  await refreshQueueCount()
+  offlineNote.value = `スナップショットを削除しました${offlineQueueCount.value > 0 ? `(オフラインの待機記録 ${offlineQueueCount.value}件は残ります)` : ''}`
+}
+
+/**
+ * 復旧確定: ローカルキューを modeId でグループ化し、1モードごとに chunk(≤ OFFLINE_FLUSH_CHUNK)で
+ * /api/scan-offline-flush に送る。シートの日時と証跡にはオフライン時の読み取り時刻(at)がそのまま載る。
+ * write_failed はキューに残す(もう一度確定できる)。
+ * オフラインモードの ON/OFF とは独立(接続が戻っていれば書ける。戻らなければ $fetch が失敗し
+ * キューはそのまま残る — 「失敗 N件は再確定できます」の注記が出る)。
+ */
+async function flushOfflineQueue() {
+  if (busy.value) return
+  const entries = await offlineListQueue().catch(() => [])
+  if (entries.length === 0) {
+    await refreshQueueCount()
+    return
+  }
+  busy.value = true
+  errorMessage.value = null
+  queueError.value = null
+  try {
+    const groups = new Map<number, OfflineQueueEntry[]>()
+    for (const e of entries) {
+      const part = groups.get(e.modeId)
+      if (part) part.push(e)
+      else groups.set(e.modeId, [e])
+    }
+    let wrote = 0
+    let skipped = 0
+    let failed = 0
+    const doneIds: string[] = []
+    for (const [modeId, part] of groups) {
+      for (let from = 0; from < part.length; from += OFFLINE_FLUSH_CHUNK) {
+        const chunk = part.slice(from, from + OFFLINE_FLUSH_CHUNK)
+        const res = await $fetch<OfflineFlushResponse>('/api/scan-offline-flush', {
+          method: 'POST',
+          body: {
+            entries: chunk.map((e) => ({ modeId: e.modeId, code: e.code, at: e.at, overwrite: e.overwrite })),
+          },
+        })
+        const byKey = new Map(res.results.map((r) => [`${r.modeId}|${r.code}`, r]))
+        for (const e of chunk) {
+          const r = byKey.get(`${e.modeId}|${e.code}`)
+          if (!r || r.status === 'write_failed') {
+            failed += 1
+            continue
+          }
+          doneIds.push(e.id)
+          if (r.status === 'ok' || r.status === 'duplicate') wrote += 1
+          else skipped += 1
+          // セッション欄の該当行を確定結果に書き換える(オンライン flush と同じ扱い)
+          for (const s of session.value) {
+            if (s.offlineQueued && s.code === e.code && s.at === e.at) {
+              s.status = r.status
+              s.written = r.written
+              s.range = r.range
+              s.at = r.at
+              s.queued = false
+              s.offlineQueued = false
+              s.overwrite = false
+            }
+          }
+        }
+      }
+    }
+    await offlineRemoveQueueEntries(doneIds)
+    await refreshQueueCount()
+    // 成功注記は offlineNote(オフラインモード欄に出す)。Banner はキュー 0 だと消えるので注記置き場にしない
+    offlineNote.value =
+      `復旧確定: ${wrote}件をシートに書き込みました${skipped > 0 ? ` / 既に済だった ${skipped}件は書き込みませんでした` : ''}${failed > 0 ? ` / 失敗 ${failed}件は再確定できます` : ''}${offlineQueueCount.value > 0 ? ` / ローカル残り ${offlineQueueCount.value}件` : ''}`
+  } catch (e: unknown) {
+    queueError.value = describeError(e)
+  } finally {
+    busy.value = false
+  }
 }
 
 // ── 新しい記録を作る(モード + シート列をその場で作れる)──────────
@@ -345,6 +612,24 @@ const activeMissingColumns = computed(() =>
       (「記録の設定」で列を追加してからスキャンしてください)
     </p>
 
+    <!-- オフラインモード(地下など電波状況の悪い場所でのスキャン・照会・チェックイン) -->
+    <div class="card offline-card">
+      <h2>オフラインモード</h2>
+      <p v-if="offlineMeta?.enabled" class="muted">
+        有効 — スナップショット {{ formatJst(offlineMeta.snapshotAt) }} / {{ offlineMeta.itemCount }}件{{ offlineMeta.capped ? `(上限 ${OFFLINE_ITEM_MAX}件で打ち切り)` : '' }}。スキャン・照会・記録・items一覧は通信を使いません。
+      </p>
+      <p v-else class="muted">
+        電波の良い場所で「オフラインモード準備」を押すと、一覧データと記録の設定をこの端末に保存します。地下などでもスキャン・照会・チェックインができ、記録は通信が復旧したらまとめてシートへ書き込みます。
+      </p>
+      <div class="mode-row">
+        <button class="btn" :disabled="prepBusy" @click="prepareOffline">{{ prepBusy ? `準備中… ${prepProgress}` : 'オフラインモード準備' }}</button>
+        <button v-if="offlineMeta?.enabled" class="btn secondary" @click="disableOffline">オフライン解除</button>
+        <button v-if="offlineMeta?.enabled" class="btn secondary" @click="deleteOfflineData">スナップショット削除</button>
+      </div>
+      <p v-if="prepError" class="error">{{ prepError }}</p>
+      <p v-if="offlineNote" class="muted">{{ offlineNote }}</p>
+    </div>
+
     <!-- 新しい記録を作る(モード + シート列。列が無ければここで追加できる) -->
     <div v-if="createOpen" class="card create-card">
       <h2>新しい記録</h2>
@@ -410,12 +695,22 @@ const activeMissingColumns = computed(() =>
       <ul class="session-list">
         <li v-for="entry in session.slice(-40)" :key="`${entry.code}-${entry.at}`">
           <span class="session-name">{{ entry.name || entry.code }}</span>
-          <span class="session-status">{{ entry.queued ? '未確定' : scanStatusMessage(entry.status) }}</span>
+          <span class="session-status">{{ entry.queued ? (entry.offlineQueued ? '未確定(ローカル)' : '未確定') : scanStatusMessage(entry.status) }}</span>
           <span class="session-at">{{ formatJst(entry.at) }}</span>
           <span v-if="entry.range" class="session-range">{{ entry.range }}</span>
         </li>
       </ul>
       <p v-if="session.length === 0" class="muted">まだ読み取りがありません。カメラでチケットのQRを次々とスキャンしてください。</p>
+    </div>
+
+    <!-- オフラインの待機記録(通信が復旧したらまとめてシートへ書き込む) -->
+    <div v-if="offlineQueueCount > 0" class="card offline-card">
+      <p>オフラインの記録 {{ offlineQueueCount }}件(通信が復旧したらまとめてシートへ書き込みます)</p>
+      <div class="mode-row">
+        <!-- オフラインモードの ON/OFF とは独立: 接続が戻っていれば確定できる(戻っていなければ失敗し、キューは残る) -->
+        <button class="btn" :disabled="busy" @click="flushOfflineQueue">オフラインの記録を確定({{ offlineQueueCount }}件)</button>
+      </div>
+      <p v-if="queueError" class="error">{{ queueError }}</p>
     </div>
   </div>
 </template>
@@ -454,6 +749,17 @@ const activeMissingColumns = computed(() =>
 }
 .pending-card {
   margin-bottom: 12px;
+}
+.offline-card {
+  margin-bottom: 12px;
+}
+.offline-card h2 {
+  font-size: 16px;
+  margin: 0 0 6px;
+}
+.offline-card p {
+  font-size: 14px;
+  margin: 0 0 8px;
 }
 .pending-name {
   font-size: 20px;

@@ -25,8 +25,20 @@ export default defineNuxtRouteMiddleware(async (to) => {
 
   let me = authState.value
   if (!me) {
-    me = await $fetch<MeState>('/api/me', { headers: useRequestHeaders(['cookie']) })
-    authState.value = me
+    try {
+      me = await $fetch<MeState>('/api/me', { headers: useRequestHeaders(['cookie']) })
+      authState.value = me
+    } catch (e: unknown) {
+      // オフラインモード中は通信を試みない。準備はログイン済み・登録済み状态下でしか
+      // items-list が403にならずに成功できないので、localStorage のメタが「昔認証できた」ことの根拠になる
+      // ( cached HTML の auth-state がある場合は上の $fetch 自体走らない。保護画面を offline で開いたとき用)。
+      if (import.meta.client && readOfflineMetaFromStorage()?.enabled) {
+        me = { authenticated: true, authorized: true, email: null }
+        authState.value = me
+        return
+      }
+      throw e
+    }
   }
 
   // SSR の Location はリクエストの localhost URL から組み立てられる。

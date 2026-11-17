@@ -72,6 +72,9 @@ import {
   type KeyFilter,
   type RemarkState,
 } from '#shared/utils/items'
+import { offlineFacets, offlineItemsQuery, offlineKeys } from '#shared/utils/offline'
+import { formatJst } from '#shared/utils/scan'
+import type { OfflineItemRow } from '~/utils/offlineStore'
 
 interface ItemsPage {
   rows: ItemRowData[]
@@ -186,6 +189,29 @@ const facetError = useState<string | null>('items-facets-error', () => null)
 const keysState = useState<ItemsKeysResponse | null>('items-keys', () => null)
 const keysError = useState<string | null>('items-keys-error', () => null)
 
+/**
+ * オフラインモード(/scan の「オフラインモード準備」で有効になる)。
+ * useOfflineState は onMounted で localStorage のメタを引き当てる(SSR は読めない)。
+ * 一覧・facets・項目キーはスナップショットからローカルで解決する(通信しない)。
+ */
+const { meta: offlineMeta, enabled: offlineEnabled } = useOfflineState()
+/** 最後の一覧ページがローカルスナップショット由来か(注記の表示用)。 */
+const offlineLookup = ref(false)
+/** スナップショット全行のローカル缓存(ページ追記ごとに getAll を打ち直さない)。 */
+let offlineRowsCache: OfflineItemRow[] | null = null
+watch([offlineEnabled, () => offlineMeta.value?.snapshotAt], () => {
+  offlineRowsCache = null // 解除・再準備でスナップショットが変われば缓存を捨てる
+})
+async function offlineRowsAll(): Promise<OfflineItemRow[]> {
+  if (!offlineRowsCache) offlineRowsCache = await offlineGetAllItems()
+  return offlineRowsCache
+}
+const offlineSnapshotLabel = computed(() => {
+  const m = offlineMeta.value
+  if (!m) return 'スナップショット'
+  return `準備 ${formatJst(m.snapshotAt)}・${m.itemCount}件${m.capped ? '(上限で打ち切り)' : ''}`
+})
+
 /** 項目欄に並べるキー(年・組・氏名・備考は専用欄があるので二重コントロールにしない)。 */
 const DEDICATED_ITEM_KEYS = new Set([ITEM_YEAR_KEY, ITEM_GROUP_KEY, ITEM_NAME_KEY, ITEM_REMARK_KEY])
 /** chip で値選択できる選択肢数の上限(これを越えるキーは部分一致で絞る。FACET_MAX_VALUES より小さい表示上限)。 */
@@ -263,29 +289,51 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
   loading.value = true
   errorMessage.value = null
   try {
-    // SSR の内部 fetch はブラウザ cookie を自動では持たないため useRequestHeaders で明示転送する。
-    const page = await $fetch<ItemsPage>('/api/items-list', {
-      query: {
-        code: code || undefined,
-        name: name || undefined,
-        years: selectedYears.length ? selectedYears : undefined,
-        groups: selectedGroups.length ? selectedGroups : undefined,
-        pairs: selectedPairs.length ? selectedPairs : undefined,
-        remark: remark || undefined,
-        // 条件なし(any)は送らない(URL を短く保つ。既定の状態は「送らない」と同じ)
-        remarkState: remarkStateApplied === 'any' ? undefined : remarkStateApplied,
-        // 任意項目の絞り込みは spec 文字列の配列で送る(値に `,` が混ざっても配列なら壊れない)
-        filters: keyFiltersApplied.length ? serializeKeyFilters(keyFiltersApplied) : undefined,
-        cursor: cur ?? undefined,
-        limit: ITEM_PAGE_SIZE,
-      },
-      headers: useRequestHeaders(['cookie']),
-    })
+    // オフラインモード: /api/items-list を呼ばず、スナップショットから**同じ意味**で絞り込み+分页する
+    // (offlineItemsQuery は items-list の PostgREST 照合をローカルで再現する。localStorage は同期読みで
+    // generation の競合処理と組み合わせて「解除された直後の追記」がオンラインに戻るようにする)。
+    const offline = import.meta.client && readOfflineMetaFromStorage()?.enabled === true
+    const page = offline
+      ? offlineItemsQuery(
+          await offlineRowsAll(),
+          {
+            code,
+            name,
+            years: selectedYears,
+            groups: selectedGroups,
+            pairs: selectedPairs,
+            remark,
+            remarkState: remarkStateApplied,
+            filters: serializeKeyFilters(keyFiltersApplied),
+            cursor: cur,
+            limit: ITEM_PAGE_SIZE,
+          },
+          ITEM_PAGE_SIZE,
+        )
+      : await $fetch<ItemsPage>('/api/items-list', {
+          // SSR の内部 fetch はブラウザ cookie を自動では持たないため useRequestHeaders で明示転送する。
+          query: {
+            code: code || undefined,
+            name: name || undefined,
+            years: selectedYears.length ? selectedYears : undefined,
+            groups: selectedGroups.length ? selectedGroups : undefined,
+            pairs: selectedPairs.length ? selectedPairs : undefined,
+            remark: remark || undefined,
+            // 条件なし(any)は送らない(URL を短く保つ。既定の状態は「送らない」と同じ)
+            remarkState: remarkStateApplied === 'any' ? undefined : remarkStateApplied,
+            // 任意項目の絞り込みは spec 文字列の配列で送る(値に `,` が混ざっても配列なら壊れない)
+            filters: keyFiltersApplied.length ? serializeKeyFilters(keyFiltersApplied) : undefined,
+            cursor: cur ?? undefined,
+            limit: ITEM_PAGE_SIZE,
+          },
+          headers: useRequestHeaders(['cookie']),
+        })
     if (gen !== generation) return // 後発検索の応答が先に適用済みの場合はこの応答を捨てて上書きしない
     rows.value = opts.reset ? page.rows : [...rows.value, ...page.rows]
     cursor.value = page.nextCursor
     total.value = page.total
     done.value = page.nextCursor === null
+    offlineLookup.value = offline
     if (opts.initial) {
       cachedFirst.value = {
         code,
@@ -308,10 +356,14 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
   }
 }
 
-/** 年・組の選択肢を取得する(失敗しても一覧は出せるので facetError だけ立てる)。 */
+/** 年・組の選択肢を取得する(失敗しても一覧は出せるので facetError だけ立てる)。オフラインはスナップショットから導出する。 */
 async function loadFacets(): Promise<void> {
   facetError.value = null
   try {
+    if (import.meta.client && readOfflineMetaFromStorage()?.enabled) {
+      facets.value = offlineFacets(await offlineRowsAll())
+      return
+    }
     facets.value = await $fetch<ItemsFacets>('/api/items-facets', {
       headers: useRequestHeaders(['cookie']),
     })
@@ -320,10 +372,14 @@ async function loadFacets(): Promise<void> {
   }
 }
 
-/** 任意項目(payload キー)の発見結果を取得する(失敗しても一覧と他の欄は出せるので keysError だけ立てる)。 */
+/** 任意項目(payload キー)の発見結果を取得する(失敗しても一覧と他の欄は出せるので keysError だけ立てる)。オフラインはスナップショットの payload から導出する(設定由来の「載る予定」キーは出ない)。 */
 async function loadKeys(): Promise<void> {
   keysError.value = null
   try {
+    if (import.meta.client && readOfflineMetaFromStorage()?.enabled) {
+      keysState.value = offlineKeys(await offlineRowsAll())
+      return
+    }
     keysState.value = await $fetch<ItemsKeysResponse>('/api/items-keys', {
       headers: useRequestHeaders(['cookie']),
     })
@@ -560,8 +616,28 @@ async function loadMore(): Promise<void> {
   if (sentinelVisible()) await loadMore()
 }
 
+/**
+ * オフラインモードのとき、hydration で引き継いだ**オンライン時の缓存**(1ページ目・facets・項目キー)を
+ * スナップショット由来に打ち直す。缓存 HTML のデータは準備時点とズレていることがあるので
+ * IDB から読み直してから追記を続ける。
+ */
+async function reloadOffline(): Promise<void> {
+  try {
+    const all = await offlineRowsAll()
+    facets.value = offlineFacets(all)
+    facetError.value = null
+    keysState.value = offlineKeys(all)
+    keysError.value = null
+    offlineLookup.value = true
+  } catch {
+    // IDB が無い・壊れている場合 facets/keys は缓存のまま。load のオフライン分岐が errorMessage を出す。
+  }
+  await load({ reset: true, initial: true })
+}
+
 onMounted(() => {
   ioSupported.value = typeof IntersectionObserver === 'function'
+  if (offlineEnabled.value) void reloadOffline()
   // 行に表示するキーを localStorage から復元(表示設定。URL の初期指定があればそちらを優先する)。
   if (!showKeys.value.length) {
     try {
@@ -908,6 +984,9 @@ await Promise.all(initialLoads)
         <span v-else-if="loading">読み込み中…</span>
         <span v-else>{{ total }} 件中 {{ rows.length }} 件表示</span>
       </p>
+      <p v-if="offlineLookup" class="muted offline-note">
+        オフラインのスナップショット({{ offlineSnapshotLabel }})から一覧を表示しています。復旧後はデータが古い場合があります。年・組・項目の選択肢もスナップショットから生成しています(同期設定由来の「載る予定」の項目は復旧後に現れます)。
+      </p>
     </div>
 
     <div v-if="errorMessage" class="error card">{{ errorMessage }}</div>
@@ -1045,6 +1124,11 @@ await Promise.all(initialLoads)
 
 .status {
   margin: 10px 0 0;
+}
+
+.offline-note {
+  margin: 6px 0 0;
+  font-size: 12px;
 }
 
 .item-list {
