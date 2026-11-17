@@ -95,6 +95,9 @@ async function main() {
       const w = video.videoWidth || 640
       const h = video.videoHeight || 480
       const side = Math.floor(Math.min(w, h) * 0.5)
+      // 毎回新しい canvas + stream を作る(この画面は再スキャン마다 video が再マウントされるので、
+      // 古い stream を new video に attach するとフレームループが張らないことがある — 実測で
+      // 再利用版は #2 検出が走らず、新 stream 版は走る)。描画は毎回同じ QR。
       const canvas = document.createElement('canvas')
       canvas.width = w
       canvas.height = h
@@ -142,9 +145,19 @@ async function main() {
   )
 
   // 3) 再スキャン → 許可 → カメラのみ(done表示)
+  // 再マウント直後に srcObject を差し替えるとフレームループが旧(フェイク)stream に
+  // 張り付いたまま検出が走らないことがある(実測)。復帰後少し待ってから差し替える。
+  await page.waitForTimeout(1200)
   await inject()
   console.log('[step] QR injected #2')
-  await page.waitForFunction((e) => document.body.textContent?.includes(e), REQUESTER, { timeout: 15000 })
+  // 再マウント後の検出は fake camera の frames が揃うタイミングで走らないことがある(実測)。
+  // 6秒で現れなければ stream を差し替えて再投入する(同じ QR なので依頼は同じ1件)。
+  await page.waitForFunction((e) => document.body.textContent?.includes(e), REQUESTER, { timeout: 6000 }).catch(async () => {
+    console.log('[step] #2 not detected yet — re-inject')
+    await page.waitForTimeout(1500)
+    await inject()
+    await page.waitForFunction((e) => document.body.textContent?.includes(e), REQUESTER, { timeout: 12000 })
+  })
   expect(await page.locator('video').count() === 0, '再スキャン後: カメラは非表示')
   await page.getByRole('button', { name: '許可する' }).click()
   console.log('[step] approve clicked')

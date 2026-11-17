@@ -253,6 +253,9 @@ onBeforeUnmount(() => {
       <video ref="video" class="scan-video" playsinline muted autoplay></video>
       <!-- 枠と検出QRの輪郭はライブラリが生成する overlay(.scan-region-highlight /
            .code-outline-highlight)が描く。自前の枠は置かない。 -->
+      <!-- 状態はカメラ内下部のキャプション(別行にすると小さい画面で bottom-nav に隠れる)。
+           muted class は既存の検証スクリプトが .muted を見て「スキャン中」を確認するため維持 -->
+      <p class="scan-status muted">{{ status }}</p>
     </div>
     <div class="mode-row">
       <button
@@ -260,24 +263,23 @@ onBeforeUnmount(() => {
         :class="{ active: mode === 'large' }"
         :disabled="disabled"
         @click="setMode('large')"
-      >スキャン範囲: 50%(大)</button>
+      >スキャン範囲: 50%</button>
       <button
         class="btn secondary"
         :class="{ active: mode === 'small' }"
         :disabled="disabled"
         @click="setMode('small')"
-      >スキャン範囲: 25%(小・ズーム)</button>
+      >スキャン範囲: 25%(ズーム)</button>
+      <button
+        v-if="running && flashAvailable"
+        class="btn secondary"
+        :class="{ active: flashOn }"
+        @click="toggleFlash"
+      >{{ flashOn ? 'ライト: ON' : 'ライト: OFF' }}</button>
+      <button v-if="running" class="btn secondary" @click="stopByUser">スキャン停止</button>
+      <button v-else class="btn" :disabled="disabled" @click="start">スキャン開始</button>
     </div>
-    <p class="muted">{{ status }}</p>
     <p v-if="error" class="error">{{ error }}</p>
-    <button
-      v-if="running && flashAvailable"
-      class="btn secondary"
-      :class="{ active: flashOn }"
-      @click="toggleFlash"
-    >{{ flashOn ? 'ライト: ON' : 'ライト: OFF' }}</button>
-    <button v-if="running" class="btn secondary" @click="stopByUser">スキャン停止</button>
-    <button v-else class="btn" :disabled="disabled" @click="start">スキャン開始</button>
   </div>
 </template>
 
@@ -286,11 +288,25 @@ onBeforeUnmount(() => {
   position: relative;
   width: 100%;
   aspect-ratio: 1 / 1;
-  max-height: 60vh;
+  /* 小さい画面(390x640程度)ではスクロールなしでカメラ+スキャン範囲のchip+停止ボタンが
+     bottom-nav の上に見えるよう、高さを画面割合で抑える(照合は映像解像度で行うので表示縮小は影響なし) */
+  max-height: clamp(220px, 37vh, 440px);
   background: #0b1220;
   border-radius: 12px;
   overflow: hidden;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
+}
+.scan-status {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  margin: 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(11, 18, 32, 0.6);
+  color: #cfe6ff;
+  font-size: 12px;
+  pointer-events: none;
 }
 .scan-video {
   width: 100%;
@@ -306,7 +322,8 @@ onBeforeUnmount(() => {
   margin-bottom: 10px;
 }
 .mode-row .btn {
-  font-size: 14px;
+  font-size: 13px;
+  padding: 7px 12px;
 }
 .mode-row .btn.active {
   box-shadow: inset 0 0 0 2px rgba(120, 190, 255, 0.8);

@@ -586,8 +586,8 @@ const activeMissingColumns = computed(() =>
   <div class="page">
     <h1>{{ recording ? activeMode?.name : 'QRコードを読む' }}</h1>
 
-    <!-- モード選択(照会 + 記録モード)。無効化されたモードは出さない -->
-    <div class="mode-row" role="group" aria-label="スキャンのモード">
+    <!-- モード選択(照会 + 記録モード)。無効化されたモードは出さない。compact(chip-row)で高さを節約 -->
+    <div class="mode-row chip-row" role="group" aria-label="スキャンのモード">
       <button
         class="btn secondary"
         :class="{ active: !recording }"
@@ -606,19 +606,22 @@ const activeMissingColumns = computed(() =>
       <!-- 設定の導線(モードの追加・変更・削除は /scan-settings でまとめて確認できる) -->
       <NuxtLink class="btn secondary" to="/scan-settings">記録の設定</NuxtLink>
     </div>
-    <p v-if="recording" class="muted">{{ activeSummary }}</p>
+    <!-- 選んだモードの列がシートのヘッダーに無いとスキャンが 400 になるため、カメラの前に注記を出す(設定画面の導線) -->
     <p v-if="activeMissingColumns.length" class="error">
       このモードの列がシートにありません: {{ activeMissingColumns.join(', ') }}
       (「記録の設定」で列を追加してからスキャンしてください)
     </p>
 
-    <!-- オフラインモード(地下など電波状況の悪い場所でのスキャン・照会・チェックイン) -->
-    <div class="card offline-card">
-      <h2>オフラインモード</h2>
-      <p v-if="offlineMeta?.enabled" class="muted">
-        有効 — スナップショット {{ formatJst(offlineMeta.snapshotAt) }} / {{ offlineMeta.itemCount }}件{{ offlineMeta.capped ? `(上限 ${OFFLINE_ITEM_MAX}件で打ち切り)` : '' }}。スキャン・照会・記録・items一覧は通信を使いません。
+    <!-- オフラインモード(地下など電波状況の悪い場所でのスキャン・照会・チェックイン)。
+         既定は折りたたみ(1行の状態だけ)。準備・解除・削除は展開して押す(電波の良い場所で行う操作)。 -->
+    <details class="card offline-card">
+      <summary class="offline-summary">
+        オフラインモード — {{ offlineMeta?.enabled ? `有効(スナップショット ${formatJst(offlineMeta.snapshotAt)}・${offlineMeta.itemCount}件${offlineMeta.capped ? `、上限 ${OFFLINE_ITEM_MAX}件で打ち切り` : ''})` : '無効(電波の良い場所で準備)' }}
+      </summary>
+      <p v-if="offlineMeta?.enabled" class="offline-desc">
+        スキャン・照会・記録・items一覧は通信を使いません。記録は通信が復旧したら「オフラインの記録を確定」でまとめてシートへ書き込みます。
       </p>
-      <p v-else class="muted">
+      <p v-else class="offline-desc">
         電波の良い場所で「オフラインモード準備」を押すと、一覧データと記録の設定をこの端末に保存します。地下などでもスキャン・照会・チェックインができ、記録は通信が復旧したらまとめてシートへ書き込みます。
       </p>
       <div class="mode-row">
@@ -627,8 +630,9 @@ const activeMissingColumns = computed(() =>
         <button v-if="offlineMeta?.enabled" class="btn secondary" @click="deleteOfflineData">スナップショット削除</button>
       </div>
       <p v-if="prepError" class="error">{{ prepError }}</p>
-      <p v-if="offlineNote" class="muted">{{ offlineNote }}</p>
-    </div>
+    </details>
+    <!-- 注記(準備完了・ローカル記録など)は折りたたみでも見えるように1行だけ外に出す -->
+    <p v-if="offlineNote" class="offline-desc offline-note-line">{{ offlineNote }}</p>
 
     <!-- 新しい記録を作る(モード + シート列。列が無ければここで追加できる) -->
     <div v-if="createOpen" class="card create-card">
@@ -662,6 +666,9 @@ const activeMissingColumns = computed(() =>
         @detected="onDetected"
       />
     </div>
+
+    <!-- 「何を記録するか」の要約はスキャン開始に不要なのでカメラの下(pending cardの直前)に出す -->
+    <p v-if="recording" class="muted">{{ activeSummary }}</p>
 
     <!-- 確認モードの pending card(氏名・現在の状態 → 記録/上書き/見送り) -->
     <div v-if="pending" class="card pending-card">
@@ -725,6 +732,11 @@ const activeMissingColumns = computed(() =>
 .mode-row .btn {
   font-size: 14px;
 }
+/* モード選択行(画面上部)は compact にして高さを節約し、カメラをスクロールなしで見せる */
+.chip-row .btn {
+  font-size: 13px;
+  padding: 7px 12px;
+}
 .mode-row .btn.active {
   box-shadow: inset 0 0 0 2px rgba(120, 190, 255, 0.8);
 }
@@ -753,13 +765,33 @@ const activeMissingColumns = computed(() =>
 .offline-card {
   margin-bottom: 12px;
 }
-.offline-card h2 {
-  font-size: 16px;
-  margin: 0 0 6px;
+/* 折りたたみ(details)の1行サマリ。閉じたときは状態だけ見え、カメラの高さを確保する */
+.offline-card summary {
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.offline-card summary:hover {
+  color: var(--accent);
 }
 .offline-card p {
   font-size: 14px;
   margin: 0 0 8px;
+}
+/* 説明文は muted class を使わない(検証スクリプトや将来のコードが画面上の最初の .muted を
+   「スキャン中」の状態行として読むため、カメラの状態行より上に .muted を置かない) */
+.offline-desc {
+  font-size: 14px;
+  color: var(--muted);
+  margin: 0 0 8px;
+}
+.offline-card[open] summary {
+  margin-bottom: 8px;
+}
+/* 注記(準備完了・ローカル記録など)は折りたたみ外の1行。カメラを押し下しないように小さく出す */
+.offline-note-line {
+  font-size: 12px;
+  margin: -6px 0 12px;
 }
 .pending-name {
   font-size: 20px;

@@ -6,7 +6,8 @@
 //     → 注意: VERIFY_SCAN_FLUSH は設定されたスプレッドシートに 配布済 / 配布日時 を書く。
 //       ローカルの dev シート(scripts/service-account.json が指す ID)に対してだけ実行すること。
 //
-// 使うコードはローカル items に実在する 1004 / 1018 / 1023(渡辺健斗・田中桔平・石坂律貴)。
+// 使うコードは実行時にローカル items から 未記録(配布済≠済)の行を3件 pick する
+// (ハードコードだと flush 実行後に済へ変わって dedupe warn になり再実行できない)。
 // モードは「チケット配布」(confirm_before_record=false = 連続で次々と記録)を選ぶ。
 import { chromium } from 'playwright-core'
 import pkg from '@zxing/library'
@@ -15,7 +16,6 @@ const { QRCodeWriter, BarcodeFormat } = pkg
 
 const base = process.argv[2] ?? 'http://127.0.0.1:3000'
 const doFlush = process.env.VERIFY_SCAN_FLUSH === '1'
-const CODES = ['1004', '1018', '1023']
 
 function matrixData(text) {
   const m = new QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, 100, 100, new Map())
@@ -85,12 +85,23 @@ async function listText() {
   return (await page.textContent('.session-list').catch(() => '')) ?? ''
 }
 
-// 待機列の行は氏名を出す(entry.name があれば氏名、なければ code)。実データの氏名で確認する。
-const NAMES = { 1004: '渡辺健斗', 1018: '田中桔平', 1023: '石坂律貴' }
-
 let failures = []
 try {
   await loginAndOpenScan()
+
+  // 未記録の行を3件 pick(チケット配布は 配布済 を書く。スキャン済み=済の行は
+  // dedupe warn になるので、開始時に未記録の行を選ぶことで再実行できる)。
+  // 待機列の行は氏名を出す(entry.name があれば氏名、なければ code)ので実データの氏名で確認する。
+  const picked = await page.evaluate(async () => {
+    const j = await (await fetch('/api/items-list?limit=200')).json()
+    return (j.rows ?? [])
+      .filter((r) => r.payload?.['配布済'] !== '済' && (r.payload?.['氏名'] ?? '') !== '')
+      .slice(0, 3)
+      .map((r) => ({ code: String(r.code), name: String(r.payload['氏名']) }))
+  })
+  if (picked.length < 3) {
+    failures.push(`未記録(配布済≠済)の items 行が3件無い(${picked.length}件)。/sync か dev シートの 配布済 を戻す`)
+  }
 
   // 記録モードを選ぶ(チップの「チケット配布」= 連続記録)
   await page.getByRole('button', { name: 'チケット配布' }).click()
@@ -103,9 +114,8 @@ try {
   )
 
   // 1件目 → 2件目 → 3件目を順に流す(同じQRの再読み取りは dedupe 窓で無視される)
-  for (const code of CODES) {
+  for (const { code, name } of picked) {
     await streamCode(code)
-    const name = NAMES[code]
     await page
       .waitForFunction((n) => document.querySelector('.session-list')?.textContent?.includes(n), name, { timeout: 12000 })
       .catch(() => failures.push(`待機列に ${code}(${name}) が現れない`))
@@ -116,12 +126,12 @@ try {
   const reads = Number((await mutedText()).match(/読み取り (\d+)件/)?.[1] ?? 0)
   const list = await listText()
   const queued = (list.match(/未確定/g) ?? []).length
-  if (!CODES.every((c) => list.includes(NAMES[c]))) failures.push('待機列に3件が並んでいない')
-  if (reads < CODES.length) failures.push(`読み取り件数が少ない(${reads}件 < ${CODES.length}件)`)
+  if (!picked.every(({ name }) => list.includes(name))) failures.push('待機列に3件が並んでいない')
+  if (reads < picked.length) failures.push(`読み取り件数が少ない(${reads}件 < ${picked.length}件)`)
   // 同じQRを窓内で再読しても未確定は3件(重複が積み上がらない)
-  if (queued !== CODES.length) failures.push(`未確定が ${queued}件(期待 ${CODES.length}件 = 窓内の再読は無視される)`)
+  if (queued !== picked.length) failures.push(`未確定が ${queued}件(期待 ${picked.length}件 = 窓内の再読は無視される)`)
 
-  console.log(`モード: チケット配布 / 読み取り ${reads}件 / 未確定 ${queued}件`)
+  console.log(`モード: チケット配布 / pick ${picked.map(({ code, name }) => `${code}(${name})`).join(' / ')} / 読み取り ${reads}件 / 未確定 ${queued}件`)
   console.log(`待機列: ${list.replace(/\s+/g, ' ').slice(0, 220)}`)
 
   if (doFlush) {
@@ -133,8 +143,8 @@ try {
 
     await page.goto(`${base}/records`, { waitUntil: 'networkidle' })
     const all = await page.textContent('body').catch(() => '')
-    const seen = CODES.filter((c) => all.includes(c))
-    if (seen.length < CODES.length) failures.push(`/records に ${seen.join(', ')} の履歴だけが現れた`)
+    const seen = picked.filter(({ code }) => all.includes(code)).map(({ code }) => code)
+    if (seen.length < picked.length) failures.push(`/records に ${seen.join(', ')} の履歴だけが現れた`)
     console.log(`/records の履歴: ${seen.join(' / ')}`)
   } else {
     console.log('flush は未実施(VERIFY_SCAN_FLUSH=1 でシート書き込みまで確認する)')
