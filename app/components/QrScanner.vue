@@ -17,6 +17,9 @@
 //  - スキャン範囲の選択(50%/25%)はスキャン→結果→スキャンの往復とリロードで維持する。
 //  - スキャン範囲とライトの制御はカメラ枠の内側(右上)に置く。向ける先を決めている視線の
 //    すぐそこで操作するため(行として下に並べると制御を探すためにカメラから目が離れる)。
+//  - `overlay` slot(枠の内側下部)を親画面が渡すときだけパネルを載せる。確認モードの氏名確認は
+//    枠の下に積むと小さい画面で bottom-nav に隠れてスクロールが必要になるので、枠の内側に被せる
+//    (app/pages/scan.vue が pending card を渡す。/register は slot を渡らないので従来そのまま)。
 import { libraryScanRegion, CROP_FRAC, SMALL_CROP_FRAC } from '#shared/utils/qr-scan'
 import { isSameScan } from '#shared/utils/scan'
 
@@ -286,6 +289,13 @@ onBeforeUnmount(() => {
       <!-- 状態はカメラ内下部のキャプション(別行にすると小さい画面で bottom-nav に隠れる)。
            muted class は既存の検証スクリプトが .muted を見て「スキャン中」を確認するため維持 -->
       <p class="scan-status muted">{{ status }}</p>
+      <!-- 枠の内側下部のスロット。確認カードのような「カメラのすぐそこで押す」操作を、
+           縦を増やさずに(= スクロールなしで)載せるための置き場。キャプションより **後**に
+           置くのは、検証スクリプトが「画面上の最初の .muted」をカメラの状態行として読むため
+           (スロット内の .muted が先頭になると状態行の読みが壊れる)。 -->
+      <div v-if="$slots.overlay" class="scan-slot">
+        <slot name="overlay" />
+      </div>
     </div>
     <!-- 停止/開始だけカメラ直下の行に残す(範囲とライトは上の枠内トグルへ移した) -->
     <div class="mode-row">
@@ -352,6 +362,20 @@ onBeforeUnmount(() => {
   color: #cfe6ff;
   font-size: 13px;
   pointer-events: none;
+}
+/* 枠の内側下部のスロット(確認カード)。キャプション(約30px)の上に乗せて、枠の高さを変えずに
+   載せる。ライブラリの scan overlay は pointer-events: none なのでクリックは邪魔されない。 */
+.scan-slot {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 44px;
+  z-index: 3;
+  padding: 10px 12px;
+  border: 1px solid rgba(207, 230, 255, 0.5);
+  border-radius: 10px;
+  background: rgba(11, 18, 32, 0.86);
+  color: #eef6ff;
 }
 .scan-video {
   width: 100%;

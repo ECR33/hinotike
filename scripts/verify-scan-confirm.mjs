@@ -7,6 +7,8 @@
 // 注意: 確認モードは記録ボタンで即 flush するので、**設定されたスプレッドシートに 来場済 / 来場日時 を書く**。
 // ローカルの dev シート(scripts/service-account.json が指す ID)に対してだけ実行すること。
 // /api/scan-check で状態を読むので、列がシートに存在する必要がある(`/scan-settings` で列を追加する)。
+// 390x640 に落としてから流れを確認カードのレイアウトも見る: 確認カードはカメラ枠の内側下部に
+// 被せるので、枠の中に収まり bottom-nav 上に見え、ボタンが押せることまで断言している。
 import { chromium } from 'playwright-core'
 import pkg from '@zxing/library'
 
@@ -85,6 +87,11 @@ try {
   await page.waitForTimeout(1500)
   await page.waitForFunction(scanning, undefined, { timeout: 10000 })
 
+  // スマホサイズに落としてから流す(確認カードが枠の内側下部に収まり、bottom-nav 上に
+  // 見えることを実測するため。描画は video.videoWidth ベース so 表示サイズの影響なし)
+  await page.setViewportSize({ width: 390, height: 640 })
+  await page.waitForTimeout(300)
+
   await streamCode(CODE)
   await page
     .waitForFunction((n) => document.querySelector('.pending-card')?.textContent?.includes(n), NAME, { timeout: 15000 })
@@ -93,6 +100,29 @@ try {
   console.log(`確認カード: ${pending.replace(/\s+/g, ' ').slice(0, 180)}`)
   const buttons = await page.evaluate(() => [...document.querySelectorAll('.pending-card button')].map((b) => b.textContent?.trim()))
   console.log(`確認カードのボタン: ${JSON.stringify(buttons)}`)
+
+  // 確認カードはカメラ枠の内側下部(QrScanner の overlay slot)に出る。枠の下に積むと
+  // 390x640 でカードが bottom-nav に158px隠れてスクロールが必要だった(実測)ので、
+  // 「枠の中 / nav の上 / ボタンが押せる」をここで固定する。
+  const fit = await page.evaluate(() => {
+    const p = document.querySelector('.pending-card')?.getBoundingClientRect()
+    const box = document.querySelector('.scan-box')?.getBoundingClientRect()
+    const nav = document.querySelector('.bottom-nav')?.getBoundingClientRect()
+    const btn = document.querySelector('.pending-card button')
+    const r = btn?.getBoundingClientRect()
+    const hit = r ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) : null
+    return {
+      insideCamera: !!(p && box && p.top >= box.top && p.bottom <= box.bottom + 1),
+      aboveNav: !!(p && nav && p.bottom <= nav.top),
+      recordHit: !!(btn && hit && btn.contains(hit)),
+      statusFirstMuted: document.querySelector('.muted')?.textContent?.includes('スキャン中') ?? false,
+    }
+  })
+  console.log(`確認カードの収まり: ${JSON.stringify(fit)}`)
+  if (!fit.insideCamera) failures.push('確認カードがカメラ枠の内側に出ていない(縦を積んでいる)')
+  if (!fit.aboveNav) failures.push('確認カードが bottom-nav に隠れる(スクロールが必要)')
+  if (!fit.recordHit) failures.push('確認カードの「記録」ボタンが別の要素に押されている')
+  if (!fit.statusFirstMuted) failures.push('画面上の最初の .muted がカメラの状態行でなくなっている')
 
   // 連続モードと違い、確認前に待機列へ勝手に積まない(誤読の安全弁)
   const sessionBefore = await page.textContent('.session-list').catch(() => '')

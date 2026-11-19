@@ -19,8 +19,9 @@
 // - 管理欄(1行サマリの details): オフラインモードの準備/解除/削除、モードの無効化・削除、
 //   新しい記録の作成、記録の設定への導線。通信の良い場所でやる管理操作なのでカメラから離す
 //   (底面バーの「管理」dropdown と同じ役割の欄。閉じた高さは1行ぶんに抑える)。
-// - 例外: オフラインの待機記録の banner と pending card・エラー・注記は運用中の情報なので
-//   折りたたみ外に出したままにする。
+// - 例外: 運用中に確認すべきもの(確認カード・オフラインの待機記録の banner・エラー・注記)は
+//   折りたたみ外に出す。確認カードはさらに **カメラ枠の内側下部**(QrScanner の overlay slot)に
+//   被せる — 枠の下に積むと小さい画面で「記録/見送り」が bottom-nav に隠れてスクロールが必要。
 import type { ScanCheckResponse, ScanConfigResponse, ScanDedupe, ScanFlushResponse, ScanMode, ScanRecordEntry } from '#shared/utils/scan'
 import { formatJst, modeColumnsMissing, scanModeSummary, scanStatusMessage, SCAN_AUTO_FLUSH_COUNT, SCAN_FLAG_VALUE } from '#shared/utils/scan'
 import type { OfflineItemRow } from '~/utils/offlineStore'
@@ -608,7 +609,24 @@ const activeMissingColumns = computed(() =>
         :continuous="recording"
         :busy="busy || (recording && pending !== null)"
         @detected="onDetected"
-      />
+      >
+        <!-- 確認モードの pending card はカメラ枠の内側下部に被せる(枠のすぐそこで記録/見送りを選ぶ)。
+             枠の下に積むと小さい画面でカードが bottom-nav に隠れてスクロールが必要だった
+             (実測 390x640 で158px隠れ)。確認中はスキャンが busy なのでプレビューを覆う実害はなく、
+             記録/見送りを押すと枠がそのまま復帰して次のQRを読める。 -->
+        <template #overlay v-if="pending">
+          <div class="pending-card" role="status" aria-live="polite">
+            <p class="pending-name">{{ pending.name || '(氏名不明)' }}</p>
+            <p class="pending-code">{{ pending.code }}</p>
+            <p class="pending-state">{{ pendingLabel(pending) }}</p>
+            <div class="mode-row pending-actions">
+              <button class="btn" :disabled="busy" @click="confirmRecord(false)">記録</button>
+              <button v-if="pending.status === 'duplicate'" class="btn secondary" :disabled="busy" @click="confirmRecord(true)">上書き</button>
+              <button class="btn secondary" @click="dismissPending">見送り</button>
+            </div>
+          </div>
+        </template>
+      </QrScanner>
     </div>
 
     <!-- モード選択(照会 + 記録モード)。無効化されたモードは出さない。compact(chip-row)で高さを節約し、
@@ -633,7 +651,7 @@ const activeMissingColumns = computed(() =>
       (「管理」欄の「記録の設定」で列を追加してからスキャンしてください)
     </p>
 
-    <!-- 「何を記録するか」の要約はスキャン開始に不要なのでカメラの下(pending cardの直前)に出す -->
+    <!-- 「何を記録するか」の要約はスキャン開始に不要なのでカメラの下に出す(確認カードは枠内) -->
     <p v-if="recording" class="muted">{{ activeSummary }}</p>
 
     <!-- オフラインの待機記録(通信が復旧したらまとめてシートへ書き込む)。
@@ -645,18 +663,6 @@ const activeMissingColumns = computed(() =>
         <button class="btn" :disabled="busy" @click="flushOfflineQueue">オフラインの記録を確定({{ offlineQueueCount }}件)</button>
       </div>
       <p v-if="queueError" class="error">{{ queueError }}</p>
-    </div>
-
-    <!-- 確認モードの pending card(氏名・現在の状態 → 記録/上書き/見送り) -->
-    <div v-if="pending" class="card pending-card">
-      <p class="pending-name">{{ pending.name || '(氏名不明)' }}</p>
-      <p class="muted">{{ pending.code }}</p>
-      <p class="pending-state">{{ pendingLabel(pending) }}</p>
-      <div class="mode-row">
-        <button class="btn" :disabled="busy" @click="confirmRecord(false)">記録</button>
-        <button v-if="pending.status === 'duplicate'" class="btn secondary" :disabled="busy" @click="confirmRecord(true)">上書き</button>
-        <button class="btn secondary" @click="dismissPending">見送り</button>
-      </div>
     </div>
 
     <!-- 記録セッション(モードの無効化・削除は管理欄へ移した。ここは「書く」操作だけ) -->
@@ -783,8 +789,18 @@ const activeMissingColumns = computed(() =>
   font-size: 13px;
   color: var(--muted);
 }
+/* 確認カードは QrScanner の overlay slot(枠の内側下部)の中に出すので、枠内の余白だけ扱う */
 .pending-card {
-  margin-bottom: 12px;
+  margin: 0;
+}
+.pending-actions {
+  margin-bottom: 0;
+}
+/* code は .muted class を使わない(検証スクリプトは「画面上の最初の .muted」をカメラの状態行として読む) */
+.pending-code {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 4px;
 }
 .offline-card {
   margin-bottom: 12px;

@@ -126,6 +126,11 @@ try {
     await page.waitForTimeout(1500)
     await page.waitForFunction(scanning, undefined, { timeout: 10000 })
 
+    // スマホサイズで確認カードの収まりを見る(カードはカメラ枠の内側下部に出る。
+    // 枠の下に積むと 390x640 で bottom-nav に隠れてスクロールが必要だった)
+    await page.setViewportSize({ width: 390, height: 640 })
+    await page.waitForTimeout(300)
+
     await page.context().setOffline(true)
     // 偽カメラは再マウント直後に検出を1回取り逃すことがあるので、カードが出なければ描き直して再試行する
     let pendingShown = false
@@ -137,6 +142,24 @@ try {
     if (!pendingShown) failures.push('オフライン確認カードに氏名が現れない(ローカルスナップショット照合が動いていない)')
     const pending = await page.textContent('.pending-card').catch(() => '')
     console.log(`オフライン確認カード: ${pending.replace(/\s+/g, ' ').slice(0, 160)}`)
+
+    const fit = await page.evaluate(() => {
+      const p = document.querySelector('.pending-card')?.getBoundingClientRect()
+      const box = document.querySelector('.scan-box')?.getBoundingClientRect()
+      const nav = document.querySelector('.bottom-nav')?.getBoundingClientRect()
+      const btn = document.querySelector('.pending-card button')
+      const r = btn?.getBoundingClientRect()
+      const hit = r ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) : null
+      return {
+        insideCamera: !!(p && box && p.top >= box.top && p.bottom <= box.bottom + 1),
+        aboveNav: !!(p && nav && p.bottom <= nav.top),
+        recordHit: !!(btn && hit && btn.contains(hit)),
+      }
+    })
+    console.log(`オフライン確認カードの収まり: ${JSON.stringify(fit)}`)
+    if (!fit.insideCamera) failures.push('オフライン確認カードがカメラ枠の内側に出ていない(縦を積んでいる)')
+    if (!fit.aboveNav) failures.push('オフライン確認カードが bottom-nav に隠れる(スクロールが必要)')
+    if (!fit.recordHit) failures.push('オフライン確認カードの「記録」ボタンが別の要素に押されている')
 
     // 記録 → ローカルキュー(IDB)に積む(通信しない)
     await page.getByRole('button', { name: /^記録$/ }).click()
