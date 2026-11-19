@@ -32,7 +32,8 @@ await page.waitForFunction(() => document.querySelector('.muted')?.textContent?.
 
 // 小モードに切替: ライブラリ overlay の枠が短辺の25%になり、内部3倍拡大の案内が出ることを確認
 // (切り替えは pause/start で照合領域を再適用するので、status が25%になってから撮る)
-await page.getByRole('button', { name: 'スキャン範囲: 25%(小・ズーム)' }).click()
+// 範囲の選択はカメラ枠の内側(右上)のトグル(aria-label がアクセシブル名。見た目は "25%×3")
+await page.getByRole('button', { name: 'スキャン範囲: 25%(ズーム)' }).click()
 await page.waitForFunction(
   () => document.querySelector('.muted')?.textContent?.includes('25%'),
   { timeout: 10000 },
@@ -43,6 +44,8 @@ const ui = await page.evaluate(() => {
   const overlay = document.querySelector('.scan-region-highlight')
   return {
     status: document.querySelector('.muted')?.textContent ?? '',
+    // 範囲トグルは枠の内側(.scan-box の中)にある
+    cornerInsideBox: !!document.querySelector('.scan-box .scan-corner-btn'),
     // プレビューは無ズーム(ライブラリは facingMode に応じたミラー transform だけを書く)
     transform: v ? getComputedStyle(v).transform : '',
     overlayRatio: overlay && box ? parseFloat(overlay.style.width) / box.clientHeight : null,
@@ -50,7 +53,7 @@ const ui = await page.evaluate(() => {
   }
 })
 console.log('small UI:', JSON.stringify(ui))
-const uiOk = ui.overlayRatio !== null && Math.abs(ui.overlayRatio - 0.25) < 0.06 &&
+const uiOk = ui.cornerInsideBox && ui.overlayRatio !== null && Math.abs(ui.overlayRatio - 0.25) < 0.06 &&
   !ui.transform.includes('matrix(4') && ui.error === null && ui.status.includes('25%') && ui.status.includes('3倍拡大')
 
 const codes = {

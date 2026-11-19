@@ -113,8 +113,8 @@ try {
     const CODE = picked.code
     const NAME = picked.name ?? CODE
 
-    // ── オフライン準備(通信あり)── 欄は折りたたみ(details)なので開いてから押す
-    await page.locator('.offline-card summary').click()
+    // ── オフライン準備(通信あり)── オフライン欄は管理欄(details)の中なので開いてから押す
+    await page.locator('.admin-card > summary').click()
     await page.getByRole('button', { name: 'オフラインモード準備' }).click()
     await page
       .waitForFunction(() => document.body.textContent?.includes('オフライン準備完了'), undefined, { timeout: 60000 })

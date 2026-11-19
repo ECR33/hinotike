@@ -10,6 +10,17 @@
 // - 記録(連続): 検出しても止めない。scan-check で即時フィードバック → 確定(/api/scan-flush)でシートへ書く
 // - 記録(確認): 検出すると pending card(氏名・現在の状態)を出し、ボタンで記録/上書き/見送り
 // - 「新しい記録を作る」でモードとシート列をその場で作れる(動的増減)
+//
+// 画面の並びは「スキャン運用の頻度」で決める(カメラを上に寄せる):
+// - カメラ(h1 の直下)= スマホのレンズは本体上部にあるため、プレビューが画面中央だと
+//   向けるべき位置とズレて QR を探しにくい。枠内右上にスキャン範囲・ライトのトグルを置く
+//   (app/components/QrScanner.vue)。
+// - カメラ直下: 停止/開始 → モード選択(その場で切り替える運用なのでタップ圏に残す)。
+// - 管理欄(1行サマリの details): オフラインモードの準備/解除/削除、モードの無効化・削除、
+//   新しい記録の作成、記録の設定への導線。通信の良い場所でやる管理操作なのでカメラから離す
+//   (底面バーの「管理」dropdown と同じ役割の欄。閉じた高さは1行ぶんに抑える)。
+// - 例外: オフラインの待機記録の banner と pending card・エラー・注記は運用中の情報なので
+//   折りたたみ外に出したままにする。
 import type { ScanCheckResponse, ScanConfigResponse, ScanDedupe, ScanFlushResponse, ScanMode, ScanRecordEntry } from '#shared/utils/scan'
 import { formatJst, modeColumnsMissing, scanModeSummary, scanStatusMessage, SCAN_AUTO_FLUSH_COUNT, SCAN_FLAG_VALUE } from '#shared/utils/scan'
 import type { OfflineItemRow } from '~/utils/offlineStore'
@@ -471,7 +482,9 @@ async function flushOfflineQueue() {
 
 // ── 新しい記録を作る(モード + シート列をその場で作れる)──────────
 
-const createOpen = useState<boolean>('scan-create-open', () => false)
+// 管理欄の中の「新しい記録を作る」はネストした details(折りたたみ)。作成できたら閉じて
+// 管理欄をcompactに戻す(open は DOM 側の状態なので ref で触る)。
+const createDetails = ref<HTMLDetailsElement | null>(null)
 const newName = ref('')
 const newFlagColumn = ref('')
 const newAtColumn = ref('')
@@ -523,7 +536,7 @@ async function createMode() {
       session.value = []
       pending.value = null
       remountScanner()
-      createOpen.value = false
+      if (createDetails.value) createDetails.value.open = false
       newName.value = ''
       newFlagColumn.value = ''
       newAtColumn.value = ''
@@ -586,7 +599,20 @@ const activeMissingColumns = computed(() =>
   <div class="page">
     <h1>{{ recording ? activeMode?.name : 'QRコードを読む' }}</h1>
 
-    <!-- モード選択(照会 + 記録モード)。無効化されたモードは出さない。compact(chip-row)で高さを節約 -->
+    <!-- 画面の最上部にカメラ(h1 の次)。スマホのレンズは本体上部にあるので、プレビューが
+         画面中央だと向けるべき位置とズレて QR を探しにくい。スキャン範囲とライトのトグルは
+         カメラ枠の内側(右上)にまとめている(app/components/QrScanner.vue) -->
+    <div class="card">
+      <QrScanner
+        :key="scannerKey"
+        :continuous="recording"
+        :busy="busy || (recording && pending !== null)"
+        @detected="onDetected"
+      />
+    </div>
+
+    <!-- モード選択(照会 + 記録モード)。無効化されたモードは出さない。compact(chip-row)で高さを節約し、
+         カメラのすぐ下のタップ圏に置く(「新しい記録を作る」「記録の設定」は管理欄へ移した) -->
     <div class="mode-row chip-row" role="group" aria-label="スキャンのモード">
       <button
         class="btn secondary"
@@ -600,75 +626,26 @@ const activeMissingColumns = computed(() =>
         :class="{ active: recording && mode.id === activeMode?.id }"
         @click="selectMode(mode)"
       >{{ mode.name }}</button>
-      <button class="btn secondary" :aria-expanded="createOpen" @click="createOpen = !createOpen">
-        新しい記録を作る
-      </button>
-      <!-- 設定の導線(モードの追加・変更・削除は /scan-settings でまとめて確認できる) -->
-      <NuxtLink class="btn secondary" to="/scan-settings">記録の設定</NuxtLink>
     </div>
-    <!-- 選んだモードの列がシートのヘッダーに無いとスキャンが 400 になるため、カメラの前に注記を出す(設定画面の導線) -->
+    <!-- 選んだモードの列がシートのヘッダーに無いとスキャンが 400 になるため、先に注記を出す(管理欄に設定画面の導線) -->
     <p v-if="activeMissingColumns.length" class="error">
       このモードの列がシートにありません: {{ activeMissingColumns.join(', ') }}
-      (「記録の設定」で列を追加してからスキャンしてください)
+      (「管理」欄の「記録の設定」で列を追加してからスキャンしてください)
     </p>
-
-    <!-- オフラインモード(地下など電波状況の悪い場所でのスキャン・照会・チェックイン)。
-         既定は折りたたみ(1行の状態だけ)。準備・解除・削除は展開して押す(電波の良い場所で行う操作)。 -->
-    <details class="card offline-card">
-      <summary class="offline-summary">
-        オフラインモード — {{ offlineMeta?.enabled ? `有効(スナップショット ${formatJst(offlineMeta.snapshotAt)}・${offlineMeta.itemCount}件${offlineMeta.capped ? `、上限 ${OFFLINE_ITEM_MAX}件で打ち切り` : ''})` : '無効(電波の良い場所で準備)' }}
-      </summary>
-      <p v-if="offlineMeta?.enabled" class="offline-desc">
-        スキャン・照会・記録・items一覧は通信を使いません。記録は通信が復旧したら「オフラインの記録を確定」でまとめてシートへ書き込みます。
-      </p>
-      <p v-else class="offline-desc">
-        電波の良い場所で「オフラインモード準備」を押すと、一覧データと記録の設定をこの端末に保存します。地下などでもスキャン・照会・チェックインができ、記録は通信が復旧したらまとめてシートへ書き込みます。
-      </p>
-      <div class="mode-row">
-        <button class="btn" :disabled="prepBusy" @click="prepareOffline">{{ prepBusy ? `準備中… ${prepProgress}` : 'オフラインモード準備' }}</button>
-        <button v-if="offlineMeta?.enabled" class="btn secondary" @click="disableOffline">オフライン解除</button>
-        <button v-if="offlineMeta?.enabled" class="btn secondary" @click="deleteOfflineData">スナップショット削除</button>
-      </div>
-      <p v-if="prepError" class="error">{{ prepError }}</p>
-    </details>
-    <!-- 注記(準備完了・ローカル記録など)は折りたたみでも見えるように1行だけ外に出す -->
-    <p v-if="offlineNote" class="offline-desc offline-note-line">{{ offlineNote }}</p>
-
-    <!-- 新しい記録を作る(モード + シート列。列が無ければここで追加できる) -->
-    <div v-if="createOpen" class="card create-card">
-      <h2>新しい記録</h2>
-      <div class="create-grid">
-        <ClearableInput v-model="newName" label="記録の名前" placeholder="例: ボランティア確認" />
-        <ClearableInput v-model="newFlagColumn" label="済/未を書くカラム" placeholder="例: 確認済" />
-        <ClearableInput v-model="newAtColumn" label="日時を書くカラム(任意)" placeholder="例: 確認日時" />
-      </div>
-      <div class="mode-row">
-        <button class="btn secondary" :class="{ active: newConfirm }" @click="newConfirm = !newConfirm">
-          {{ newConfirm ? '氏名を確認してから記録' : '連続で次々と記録' }}
-        </button>
-        <button class="btn secondary" :class="{ active: newDedupe === 'warn' }" @click="newDedupe = 'warn'">重複: 警告</button>
-        <button class="btn secondary" :class="{ active: newDedupe === 'skip' }" @click="newDedupe = 'skip'">重複: 記録しない</button>
-        <button class="btn secondary" :class="{ active: newDedupe === 'allow' }" @click="newDedupe = 'allow'">重複: 上書き</button>
-      </div>
-      <button class="btn secondary" :class="{ active: newAddColumns }" @click="newAddColumns = !newAddColumns">
-        {{ newAddColumns ? 'シートの列を追加する(取り込みカラムにも追加)' : '既存の列だけ使う' }}
-      </button>
-      <p v-if="createError" class="error">{{ createError }}</p>
-      <p v-if="createNote" class="muted">{{ createNote }}</p>
-      <button class="btn" :disabled="createBusy" @click="createMode">{{ createBusy ? '作成中…' : '作成してスキャン開始' }}</button>
-    </div>
-
-    <div class="card">
-      <QrScanner
-        :key="scannerKey"
-        :continuous="recording"
-        :busy="busy || (recording && pending !== null)"
-        @detected="onDetected"
-      />
-    </div>
 
     <!-- 「何を記録するか」の要約はスキャン開始に不要なのでカメラの下(pending cardの直前)に出す -->
     <p v-if="recording" class="muted">{{ activeSummary }}</p>
+
+    <!-- オフラインの待機記録(通信が復旧したらまとめてシートへ書き込む)。
+         未確定のデータへの注意なので管理欄(折りたたみ)の外に残す -->
+    <div v-if="offlineQueueCount > 0" class="card offline-card">
+      <p>オフラインの記録 {{ offlineQueueCount }}件(通信が復旧したらまとめてシートへ書き込みます)</p>
+      <div class="mode-row">
+        <!-- オフラインモードの ON/OFF とは独立: 接続が戻っていれば確定できる(戻っていなければ失敗し、キューは残る) -->
+        <button class="btn" :disabled="busy" @click="flushOfflineQueue">オフラインの記録を確定({{ offlineQueueCount }}件)</button>
+      </div>
+      <p v-if="queueError" class="error">{{ queueError }}</p>
+    </div>
 
     <!-- 確認モードの pending card(氏名・現在の状態 → 記録/上書き/見送り) -->
     <div v-if="pending" class="card pending-card">
@@ -682,7 +659,7 @@ const activeMissingColumns = computed(() =>
       </div>
     </div>
 
-    <!-- 記録セッション -->
+    <!-- 記録セッション(モードの無効化・削除は管理欄へ移した。ここは「書く」操作だけ) -->
     <div v-if="recording" class="card session-card">
       <p class="muted">
         このセッション: 記録 {{ okCount }}件 / 重複 {{ duplicateCount }}件 / 問題 {{ problemCount }}件 / 未確定 {{ queuedCount }}件
@@ -691,10 +668,6 @@ const activeMissingColumns = computed(() =>
         <button class="btn" :disabled="busy || queuedCount === 0" @click="flush">
           {{ queuedCount > 0 ? `書き込みを確定(${queuedCount}件)` : '書き込みを確定' }}
         </button>
-        <button class="btn secondary" :disabled="busy" @click="toggleActiveModeEnabled">
-          {{ activeMode?.enabled ? 'このモードを無効化' : 'このモードを有効化' }}
-        </button>
-        <button class="btn secondary danger" :disabled="busy" @click="deleteActiveMode">このモードを削除</button>
         <NuxtLink class="btn secondary" to="/records">記録履歴</NuxtLink>
       </div>
       <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
@@ -709,16 +682,67 @@ const activeMissingColumns = computed(() =>
       </ul>
       <p v-if="session.length === 0" class="muted">まだ読み取りがありません。カメラでチケットのQRを次々とスキャンしてください。</p>
     </div>
+    <!-- 管理欄: 電波の良い場所・スキャンの合間にやる操作を1行サマリの折りたたみにまとめる
+         (オフラインモードの準備/解除/削除・このモードの無効化/削除・新しい記録を作る・記録の設定) -->
+    <details class="card admin-card offline-card">
+      <summary class="offline-summary">
+        管理 — オフラインモード: {{ offlineMeta?.enabled ? `有効(スナップショット ${formatJst(offlineMeta.snapshotAt)}・${offlineMeta.itemCount}件${offlineMeta.capped ? `、上限 ${OFFLINE_ITEM_MAX}件で打ち切り` : ''})` : '無効(電波の良い場所で準備)' }}
+      </summary>
 
-    <!-- オフラインの待機記録(通信が復旧したらまとめてシートへ書き込む) -->
-    <div v-if="offlineQueueCount > 0" class="card offline-card">
-      <p>オフラインの記録 {{ offlineQueueCount }}件(通信が復旧したらまとめてシートへ書き込みます)</p>
+      <h2>オフラインモード</h2>
+      <p v-if="offlineMeta?.enabled" class="offline-desc">
+        スキャン・照会・記録・items一覧は通信を使いません。記録は通信が復旧したら「オフラインの記録を確定」でまとめてシートへ書き込みます。
+      </p>
+      <p v-else class="offline-desc">
+        電波の良い場所で「オフラインモード準備」を押すと、一覧データと記録の設定をこの端末に保存します。地下などでもスキャン・照会・チェックインができ、記録は通信が復旧したらまとめてシートへ書き込みます。
+      </p>
       <div class="mode-row">
-        <!-- オフラインモードの ON/OFF とは独立: 接続が戻っていれば確定できる(戻っていなければ失敗し、キューは残る) -->
-        <button class="btn" :disabled="busy" @click="flushOfflineQueue">オフラインの記録を確定({{ offlineQueueCount }}件)</button>
+        <button class="btn" :disabled="prepBusy" @click="prepareOffline">{{ prepBusy ? `準備中… ${prepProgress}` : 'オフラインモード準備' }}</button>
+        <button v-if="offlineMeta?.enabled" class="btn secondary" @click="disableOffline">オフライン解除</button>
+        <button v-if="offlineMeta?.enabled" class="btn secondary" @click="deleteOfflineData">スナップショット削除</button>
       </div>
-      <p v-if="queueError" class="error">{{ queueError }}</p>
-    </div>
+      <p v-if="prepError" class="error">{{ prepError }}</p>
+      <!-- 注記(準備完了・ローカル記録など)はこの欄の中で出す(閉じている間はカメラを押し下げない) -->
+      <p v-if="offlineNote" class="offline-desc offline-note-line">{{ offlineNote }}</p>
+
+      <h2>スキャンしているモード</h2>
+      <p v-if="!recording" class="offline-desc">照会モードです(記録モードを選ぶと、ここにモードの操作が出ます)。</p>
+      <div class="mode-row">
+        <button class="btn secondary" :disabled="busy || !recording" @click="toggleActiveModeEnabled">
+          {{ activeMode?.enabled ? 'このモードを無効化' : 'このモードを有効化' }}
+        </button>
+        <button class="btn secondary danger" :disabled="busy || !recording" @click="deleteActiveMode">このモードを削除</button>
+        <NuxtLink class="btn secondary" to="/records">記録履歴</NuxtLink>
+        <NuxtLink class="btn secondary" to="/scan-settings">記録の設定</NuxtLink>
+      </div>
+
+      <!-- 新しい記録を作る(モード + シート列。列が無ければここで追加できる)。
+           管理欄の中でもさらに折りたたみ(1行サマリ)にして、通常は高さを出さない -->
+      <details ref="createDetails" class="sub-details">
+        <summary>新しい記録を作る(モードとシートの列をその場で追加)</summary>
+        <div class="create-card">
+          <div class="create-grid">
+            <ClearableInput v-model="newName" label="記録の名前" placeholder="例: ボランティア確認" />
+            <ClearableInput v-model="newFlagColumn" label="済/未を書くカラム" placeholder="例: 確認済" />
+            <ClearableInput v-model="newAtColumn" label="日時を書くカラム(任意)" placeholder="例: 確認日時" />
+          </div>
+          <div class="mode-row">
+            <button class="btn secondary" :class="{ active: newConfirm }" @click="newConfirm = !newConfirm">
+              {{ newConfirm ? '氏名を確認してから記録' : '連続で次々と記録' }}
+            </button>
+            <button class="btn secondary" :class="{ active: newDedupe === 'warn' }" @click="newDedupe = 'warn'">重複: 警告</button>
+            <button class="btn secondary" :class="{ active: newDedupe === 'skip' }" @click="newDedupe = 'skip'">重複: 記録しない</button>
+            <button class="btn secondary" :class="{ active: newDedupe === 'allow' }" @click="newDedupe = 'allow'">重複: 上書き</button>
+          </div>
+          <button class="btn secondary" :class="{ active: newAddColumns }" @click="newAddColumns = !newAddColumns">
+            {{ newAddColumns ? 'シートの列を追加する(取り込みカラムにも追加)' : '既存の列だけ使う' }}
+          </button>
+          <p v-if="createError" class="error">{{ createError }}</p>
+          <p v-if="createNote" class="muted">{{ createNote }}</p>
+          <button class="btn" :disabled="createBusy" @click="createMode">{{ createBusy ? '作成中…' : '作成してスキャン開始' }}</button>
+        </div>
+      </details>
+    </details>
   </div>
 </template>
 
@@ -744,7 +768,7 @@ const activeMissingColumns = computed(() =>
   color: var(--danger);
 }
 .create-card {
-  margin-bottom: 12px;
+  margin: 10px 0 0;
 }
 .create-grid {
   display: grid;
@@ -778,6 +802,32 @@ const activeMissingColumns = computed(() =>
   font-size: 14px;
   margin: 0 0 8px;
 }
+/* 管理欄(admin-card)の見出し。栏の中でもcompactな1行にして縦に伸ばさない */
+.admin-card h2 {
+  font-size: 14px;
+  margin: 14px 0 6px;
+  color: var(--accent);
+}
+.admin-card h2:first-of-type {
+  margin-top: 10px;
+}
+/* 管理欄の中のネストした折りたたみ(新しい記録を作る) */
+.sub-details {
+  margin-top: 14px;
+  border-top: 1px solid #1f2b3d;
+  padding-top: 10px;
+}
+.sub-details > summary {
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.sub-details > summary:hover {
+  color: var(--accent);
+}
+.sub-details .mode-row:last-of-type {
+  margin-bottom: 10px;
+}
 /* 説明文は muted class を使わない(検証スクリプトや将来のコードが画面上の最初の .muted を
    「スキャン中」の状態行として読むため、カメラの状態行より上に .muted を置かない) */
 .offline-desc {
@@ -788,10 +838,10 @@ const activeMissingColumns = computed(() =>
 .offline-card[open] summary {
   margin-bottom: 8px;
 }
-/* 注記(準備完了・ローカル記録など)は折りたたみ外の1行。カメラを押し下しないように小さく出す */
+/* 注記(準備完了・ローカル記録など)は管理欄の中の1行(閉じている間はカメラを押し下げない) */
 .offline-note-line {
   font-size: 12px;
-  margin: -6px 0 12px;
+  margin: 8px 0 0;
 }
 .pending-name {
   font-size: 20px;

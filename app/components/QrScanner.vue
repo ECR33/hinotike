@@ -15,6 +15,8 @@
 //    なければ WebWorker の jsQR)。QRなし・壊れたQRの onDecodeError は swallow し、
 //    エラー表示を出さない。
 //  - スキャン範囲の選択(50%/25%)はスキャン→結果→スキャンの往復とリロードで維持する。
+//  - スキャン範囲とライトの制御はカメラ枠の内側(右上)に置く。向ける先を決めている視線の
+//    すぐそこで操作するため(行として下に並べると制御を探すためにカメラから目が離れる)。
 import { libraryScanRegion, CROP_FRAC, SMALL_CROP_FRAC } from '#shared/utils/qr-scan'
 import { isSameScan } from '#shared/utils/scan'
 
@@ -250,6 +252,34 @@ onBeforeUnmount(() => {
 <template>
   <div>
     <div class="scan-box">
+      <!-- 範囲とライトの制御は枠の内側(右上)。向ける先を決めている視線のすぐそこで操作する
+           (行として下に並べると、制御を探す間にカメラから目が離れて QR を探しにくい)。
+           aria-label でアクセシブル名を「スキャン範囲: …」にする(見た目は "50%"/"25%×3")。 -->
+      <div class="scan-corners">
+        <button
+          class="scan-corner-btn"
+          :class="{ active: mode === 'large' }"
+          aria-label="スキャン範囲: 50%"
+          :aria-pressed="mode === 'large'"
+          :disabled="disabled"
+          @click="setMode('large')"
+        >50%</button>
+        <button
+          class="scan-corner-btn"
+          :class="{ active: mode === 'small' }"
+          aria-label="スキャン範囲: 25%(ズーム)"
+          :aria-pressed="mode === 'small'"
+          :disabled="disabled"
+          @click="setMode('small')"
+        >25%×3</button>
+        <button
+          v-if="running && flashAvailable"
+          class="scan-corner-btn"
+          :class="{ active: flashOn }"
+          :aria-pressed="flashOn"
+          @click="toggleFlash"
+        >{{ flashOn ? 'ライト: ON' : 'ライト: OFF' }}</button>
+      </div>
       <video ref="video" class="scan-video" playsinline muted autoplay></video>
       <!-- 枠と検出QRの輪郭はライブラリが生成する overlay(.scan-region-highlight /
            .code-outline-highlight)が描く。自前の枠は置かない。 -->
@@ -257,25 +287,8 @@ onBeforeUnmount(() => {
            muted class は既存の検証スクリプトが .muted を見て「スキャン中」を確認するため維持 -->
       <p class="scan-status muted">{{ status }}</p>
     </div>
+    <!-- 停止/開始だけカメラ直下の行に残す(範囲とライトは上の枠内トグルへ移した) -->
     <div class="mode-row">
-      <button
-        class="btn secondary"
-        :class="{ active: mode === 'large' }"
-        :disabled="disabled"
-        @click="setMode('large')"
-      >スキャン範囲: 50%</button>
-      <button
-        class="btn secondary"
-        :class="{ active: mode === 'small' }"
-        :disabled="disabled"
-        @click="setMode('small')"
-      >スキャン範囲: 25%(ズーム)</button>
-      <button
-        v-if="running && flashAvailable"
-        class="btn secondary"
-        :class="{ active: flashOn }"
-        @click="toggleFlash"
-      >{{ flashOn ? 'ライト: ON' : 'ライト: OFF' }}</button>
       <button v-if="running" class="btn secondary" @click="stopByUser">スキャン停止</button>
       <button v-else class="btn" :disabled="disabled" @click="start">スキャン開始</button>
     </div>
@@ -288,13 +301,45 @@ onBeforeUnmount(() => {
   position: relative;
   width: 100%;
   aspect-ratio: 1 / 1;
-  /* 小さい画面(390x640程度)ではスクロールなしでカメラ+スキャン範囲のchip+停止ボタンが
-     bottom-nav の上に見えるよう、高さを画面割合で抑える(照合は映像解像度で行うので表示縮小は影響なし) */
-  max-height: clamp(220px, 37vh, 440px);
+  /* 画面の上部にカメラが来る配置(/scan)なので、空いたぶんだけ大きく見せる(上限は画面割合)。
+     照合は映像解像度で行うので表示縮小は影響せず、390x640 でも停止/開始行とモード選択が
+     bottom-nav の上に収まる高さにとどめる(実測は scripts/verify-camera.mjs の layout 節)。 */
+  max-height: clamp(240px, 42vh, 450px);
   background: #0b1220;
   border-radius: 12px;
   overflow: hidden;
   margin-bottom: 10px;
+}
+/* 枠の内側右上に寄せる範囲・ライトのトグル(枠の geometry はライブラリ overlay のまま) */
+.scan-corners {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.scan-corner-btn {
+  /* 現場は片手で端末、もう片手でQRを掲げるので、押し損ねないだけの当たりを確保する
+     (カメラの写る範囲を狭めないよう、枠の内側の高さは保ったまま min-height を上げる) */
+  min-height: 34px;
+  padding: 6px 11px;
+  border: 1px solid rgba(207, 230, 255, 0.55);
+  border-radius: 999px;
+  background: rgba(11, 18, 32, 0.72);
+  color: #cfe6ff;
+  font-size: 13px;
+  line-height: 1.2;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.scan-corner-btn.active {
+  border-color: #7ecbff;
+  box-shadow: inset 0 0 0 1px rgba(126, 203, 255, 0.9);
+}
+.scan-corner-btn:disabled {
+  opacity: 0.6;
 }
 .scan-status {
   position: absolute;
@@ -305,7 +350,7 @@ onBeforeUnmount(() => {
   border-radius: 6px;
   background: rgba(11, 18, 32, 0.6);
   color: #cfe6ff;
-  font-size: 12px;
+  font-size: 13px;
   pointer-events: none;
 }
 .scan-video {

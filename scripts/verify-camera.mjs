@@ -1,5 +1,7 @@
 // ヘッドレス Chrome(fake camera device)で /scan のスキャン挙動を実測する検証。
-// 新仕様に合わせている: 自動起動(開始ボタン押下なし)、中央枠 overlay、スキャン停止/再開。
+// 新仕様に合わせている: 自動起動(開始ボタン押下なし)、中央枠 overlay、スキャン停止/再開、
+// カメラを画面上部に置くレイアウト(390x640 などでカメラ+停止/開始+モード選択が bottom-nav 上に
+// スクロールなしで収まり、枠の内側右上の範囲トグルが押せること)。
 // 使い方: node scripts/verify-camera.mjs [baseUrl]
 import { chromium } from 'playwright-core'
 
@@ -47,6 +49,47 @@ const runningState = await page.evaluate(() => {
 })
 console.log('running(auto-start):', JSON.stringify(runningState))
 
+// 枠の内側(右上)トグル: 範囲の選択が効く + overlay(pointer-events:none)に押されずに click できる
+const cornerClick = await page.evaluate(() => {
+  const btn = [...document.querySelectorAll('.scan-box .scan-corner-btn')].find((b) => b.getAttribute('aria-label')?.includes('25%'))
+  if (!btn) return { present: false }
+  const r = btn.getBoundingClientRect()
+  const box = document.querySelector('.scan-box')?.getBoundingClientRect()
+  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+  return {
+    present: true,
+    insideBox: !!box && r.top >= box.top - 1 && r.right <= box.right + 1,
+    hitIsButton: !!hit && (hit === btn || btn.contains(hit)),
+  }
+})
+console.log('corner toggle(範囲/ライト):', JSON.stringify(cornerClick))
+
+// レイアウト: スマホサイズでカメラが画面上部にあり、停止/開始+モード選択が bottom-nav 上に収まるか
+const layoutSizes = [[390, 640], [430, 800], [412, 915]]
+const layouts = []
+for (const [width, height] of layoutSizes) {
+  await page.setViewportSize({ width, height })
+  await page.waitForTimeout(300)
+  layouts.push(await page.evaluate((size) => {
+    const box = document.querySelector('.scan-box')?.getBoundingClientRect()
+    const scannerRow = document.querySelector('.scan-box')?.parentElement?.querySelector('.mode-row')?.getBoundingClientRect()
+    const chips = document.querySelector('.chip-row')?.getBoundingClientRect()
+    const nav = document.querySelector('.bottom-nav')?.getBoundingClientRect()
+    return {
+      size: `${size[0]}x${size[1]}`,
+      cameraTop: box ? Math.round(box.top) : null,
+      // カメラの中心が viewport の上部寄りにあるか(= レンズ位置とプレビューのズレが小さいか)
+      cameraCenterRatio: box ? Math.round(((box.top + box.height / 2) / innerHeight) * 100) / 100 : null,
+      fitsWithoutScroll: !!(box && scannerRow && chips && nav && box.top >= 0 && chips.bottom <= nav.top + 1),
+      controlsBottom: chips ? Math.round(chips.bottom) : null,
+      navTop: nav ? Math.round(nav.top) : null,
+    }
+  }, [width, height]))
+}
+console.log('layout:', JSON.stringify(layouts))
+await page.setViewportSize({ width: 1280, height: 900 })
+await page.waitForTimeout(300)
+
 // スキャン停止 → カメラ解放・開始ボタン復帰
 await page.getByRole('button', { name: 'スキャン停止' }).click()
 await page.waitForTimeout(400)
@@ -76,11 +119,14 @@ const ok =
   runningState.srcObjectActive && runningState.videoReadyState >= 2 && runningState.error === null &&
   !runningState.aimFrame && runningState.overlayPresent && runningState.overlayInsideBox &&
   runningState.overlaySiblingOfVideo && runningState.svgStroke === 'rgb(126, 203, 255)' &&
+  cornerClick.present && cornerClick.insideBox && cornerClick.hitIsButton &&
+  layouts.length === layoutSizes.length &&
+  layouts.every((l) => l.fitsWithoutScroll && l.cameraTop !== null && l.cameraTop <= 160 && l.cameraCenterRatio !== null && l.cameraCenterRatio <= 0.45) &&
   runningState.codeOutlineSvgPresent && runningState.stopButton &&
   !stoppedState.srcObjectActive && !stoppedState.overlayPresent && stoppedState.startButton &&
   resumed.srcObjectActive && resumed.overlayPresent && resumed.error === null && errors.length === 0
 
 console.log(errors.length ? `pageerrors: ${errors.join(' | ')}` : 'pageerrors: none')
-console.log(ok ? 'verdict: OK(自動起動・標準UIの枠・停止/再開・エラー表示なし)' : 'verdict: FAIL')
+console.log(ok ? 'verdict: OK(自動起動・標準UIの枠・停止/再開・カメラ上部のレイアウト・トグル操作)' : 'verdict: FAIL')
 await browser.close()
 process.exit(ok ? 0 : 1)

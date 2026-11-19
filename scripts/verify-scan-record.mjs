@@ -153,7 +153,16 @@ try {
   failures.push(`例外: ${e instanceof Error ? e.message : String(e)}`)
 }
 
-if (failures.length) {
+// dev サーバにサービスアカウント鍵が無いと check/flush が 400 になり、上の失敗は全部その副作用なので原因を先頭に書く。
+  // (.env.development の GOOGLE_SERVICE_ACCOUNT_JSON=./scripts/service-account.json は Nuxt には パス文字列 として渡り、
+  //  鍵 JSON として parse されないため dev では「鍵なし」扱いになる。書き込み側まで検証したいときは鍵の JSON 文字列を env に渡して起動する)
+  if ((await page.textContent('body').catch(() => '')).includes('GOOGLE_SERVICE_ACCOUNT_JSON')) {
+    failures.unshift(
+      'dev サーバに サービスアカウント鍵が無いので書き込みが 400 で落ちた(.env.development の GOOGLE_SERVICE_ACCOUNT_JSON はパス指定なので鍵として読まれない。鍵の JSON 文字列を env に渡して dev サーバを起動し直すこと)',
+    )
+  }
+
+  if (failures.length) {
   console.log(`FAIL: ${failures.join(' / ')}`)
   console.log(`画面=${(await page.textContent('body').catch(() => '')).slice(0, 200)}`)
 }

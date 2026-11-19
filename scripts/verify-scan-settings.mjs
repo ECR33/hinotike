@@ -42,8 +42,9 @@ async function configModes() {
   })
 }
 
+// モードチップ行だけを読む(camera 直下の .chip-row。管理欄(details)の中にも .mode-row があるので絞る)
 async function chipNames() {
-  return page.evaluate(() => [...document.querySelectorAll('.mode-row .btn')].map((b) => b.textContent?.trim() ?? ''))
+  return page.evaluate(() => [...document.querySelectorAll('.chip-row .btn')].map((b) => b.textContent?.trim() ?? ''))
 }
 
 /** カードは click 時に hasText を再解決するので、名前を変えても残るカラム名で特定する。 */
@@ -66,6 +67,23 @@ try {
     failures.push('/api/scan-config が読めない(dev サーバ / 認証 / RLS を確認)')
   }
 
+  // 前の実行が途中で失敗して残った検証用モードを消しておく(同名で作成に失敗しないようにするため。
+  // 「リストが正」を POST するので、残骸だけを落とせば既定プリセットはそのまま残る)
+  await page
+    .evaluate(async (names) => {
+      const r = await fetch('/api/scan-config')
+      if (!r.ok) return
+      const j = await r.json()
+      const keep = (j.modes ?? []).filter((m) => !names.some((n) => m.name === n || m.name === `${n}(改名)`))
+      if (keep.length === (j.modes ?? []).length) return
+      await fetch('/api/scan-config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ modes: keep }),
+      })
+    }, [THROWAWAY_NAME, RENAMED_NAME])
+    .catch(() => {})
+
   await page.goto(`${base}/scan-settings`, { waitUntil: 'networkidle' })
   console.log(`設定画面のモード: ${JSON.stringify((await configModes())?.map((m) => m.name))}`)
   // 列がシートのヘッダーに無いときの注記(既定プリセットの 配布済/来場済 は dev シートに無いので出る)
@@ -85,7 +103,9 @@ try {
   // 2) /scan のチップに現れるか + 列が無いモードを選ぶとスキャン前に注記が出るか
   await page.goto(`${base}/scan`, { waitUntil: 'networkidle' })
   if (!(await chipNames()).includes(THROWAWAY_NAME)) failures.push('/scan のモードチップに作成したモードが現れない')
-  if ((await page.getByRole('link', { name: '記録の設定' }).count()) === 0) failures.push('/scan に設定画面へのリンクがない')
+  // 「記録の設定」への導線は管理欄(折りたたみ)の中。開いてから数える(閉じた欄のリンクは押せない)
+  await page.locator('.admin-card > summary').click()
+  if ((await page.getByRole('link', { name: '記録の設定' }).count()) === 0) failures.push('/scan の管理欄に設定画面へのリンクがない')
   await page.getByRole('button', { name: THROWAWAY_NAME }).click()
   await page.waitForTimeout(800)
   const scanNote = await page.evaluate(() => document.body.textContent?.includes('このモードの列がシートにありません'))
