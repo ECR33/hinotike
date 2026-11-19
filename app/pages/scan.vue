@@ -23,6 +23,7 @@
 //   折りたたみ外に出す。確認カードはさらに **カメラ枠の内側下部**(QrScanner の overlay slot)に
 //   被せる — 枠の下に積むと小さい画面で「記録/見送り」が bottom-nav に隠れてスクロールが必要。
 import type { ScanCheckResponse, ScanConfigResponse, ScanDedupe, ScanFlushResponse, ScanMode, ScanRecordEntry } from '#shared/utils/scan'
+import { readBeepMutedFromStorage, writeBeepMutedToStorage } from '~/utils/scanBeep'
 import { formatJst, modeColumnsMissing, scanModeSummary, scanStatusMessage, SCAN_AUTO_FLUSH_COUNT, SCAN_FLAG_VALUE } from '#shared/utils/scan'
 import type { OfflineItemRow } from '~/utils/offlineStore'
 import type { OfflineFlushResponse, OfflineMeta, OfflineQueueEntry } from '#shared/utils/offline'
@@ -94,6 +95,19 @@ const session = useState<SessionEntry[]>('scan-session', () => [])
 const pending = useState<ScanCheckResponse | null>('scan-pending', () => null)
 const busy = ref(false)
 const errorMessage = ref<string | null>(null)
+// 読み取り音の静音(QrScanner と同じ共有 state。この欄のスイッチが操作する)。
+// SSR は localStorage を読めないため既定「鳴る」で描画し、onMounted で復元する(hydration mismatch 回避)。
+const beepMuted = useState<boolean>('qr-scan-beep-muted', () => false)
+const beepStateReady = ref(false)
+onMounted(() => {
+  beepMuted.value = readBeepMutedFromStorage()
+  beepStateReady.value = true
+})
+watch(beepMuted, (muted) => writeBeepMutedToStorage(muted))
+/** 静音のON/OFFはラベルに出すが、SSRの時点では復元前なので「読み取り音」だけを出す(復元後にON/OFFになる)。 */
+const beepSwitchLabel = computed(() =>
+  beepStateReady.value ? (beepMuted.value ? '読み取り音: OFF' : '読み取り音: ON') : '読み取り音',
+)
 const flushNote = ref<string | null>(null)
 const offlineNote = ref<string | null>(null)
 // 復旧確定(/api/scan-offline-flush)の失敗用。セッション欄の errorMessage と分ける(照会モードでもBannerに出せるようにする)
@@ -710,6 +724,14 @@ const activeMissingColumns = computed(() =>
       <p v-if="prepError" class="error">{{ prepError }}</p>
       <!-- 注記(準備完了・ローカル記録など)はこの欄の中で出す(閉じている間はカメラを押し下げない) -->
       <p v-if="offlineNote" class="offline-desc offline-note-line">{{ offlineNote }}</p>
+
+      <h2>読み取り音</h2>
+      <p class="offline-desc">
+        QRが読めた瞬間に短い「ピッ」を鳴らす(合成音なので通信不要 = オフラインでも鳴る。同じQRを2.5秒以内に再読したときは鳴らない)。選び方はこの端末に記憶する。
+      </p>
+      <div class="mode-row">
+        <button class="btn secondary" :aria-pressed="!beepMuted" @click="beepMuted = !beepMuted">{{ beepSwitchLabel }}</button>
+      </div>
 
       <h2>スキャンしているモード</h2>
       <p v-if="!recording" class="offline-desc">照会モードです(記録モードを選ぶと、ここにモードの操作が出ます)。</p>

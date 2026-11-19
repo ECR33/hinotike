@@ -143,6 +143,16 @@ try {
     const pending = await page.textContent('.pending-card').catch(() => '')
     console.log(`オフライン確認カード: ${pending.replace(/\s+/g, ' ').slice(0, 160)}`)
 
+    // 「記録」は busy の間 disabledになる(disabled は hit-test されない)ので、有効化されてから
+    // hit を測る(押せる状態の実測)。待機がタイムアウトした場合は下の断言で失敗になる。
+    await page.waitForFunction(() => {
+      const b = document.querySelector('.pending-card button')
+      return !!b && !b.disabled
+    }, undefined, { timeout: 15000 }).catch(() => {})
+    // 準備操作(管理欄は画面下)で画面が下にスクロールしたままなので、スキャンの実際の位置(最上部)に
+    // 戻してから測る(= 実使用で「スクロールせずに押せる」を見る)。
+    await page.evaluate(() => window.scrollTo(0, 0))
+    await page.waitForTimeout(200)
     const fit = await page.evaluate(() => {
       const p = document.querySelector('.pending-card')?.getBoundingClientRect()
       const box = document.querySelector('.scan-box')?.getBoundingClientRect()
@@ -154,12 +164,19 @@ try {
         insideCamera: !!(p && box && p.top >= box.top && p.bottom <= box.bottom + 1),
         aboveNav: !!(p && nav && p.bottom <= nav.top),
         recordHit: !!(btn && hit && btn.contains(hit)),
+        // 画面内に本当に見える(スクロールなしで押せる)こと
+        btnInViewport: !!(r && r.top >= 0 && r.bottom <= window.innerHeight),
+        // 失敗したときの原因を見えるようにする(disabled は hit-test されない / 別の要素が被さる)
+        btnDisabled: btn?.disabled ?? null,
+        hitTag: hit?.tagName ?? null,
+        hitClass: hit?.className ?? null,
       }
     })
     console.log(`オフライン確認カードの収まり: ${JSON.stringify(fit)}`)
     if (!fit.insideCamera) failures.push('オフライン確認カードがカメラ枠の内側に出ていない(縦を積んでいる)')
     if (!fit.aboveNav) failures.push('オフライン確認カードが bottom-nav に隠れる(スクロールが必要)')
     if (!fit.recordHit) failures.push('オフライン確認カードの「記録」ボタンが別の要素に押されている')
+    if (!fit.btnInViewport) failures.push('オフライン確認カードの「記録」が画面内に見えない(スクロールが必要)')
 
     // 記録 → ローカルキュー(IDB)に積む(通信しない)
     await page.getByRole('button', { name: /^記録$/ }).click()

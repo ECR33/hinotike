@@ -1,6 +1,7 @@
 // /scan の検出(標準UIの連続スキャン)に fakeカメラの代わりにQR画像(canvas.captureStream)を流し、
 // 中央枠のQRのみが検出されること(隣のQRは無視)を実測する検証。
 // 中央コードは実データ 1004(渡辺健斗)、左右は存在しないコード。
+// 読み取り音(「ピッ」)も見る: 中央のQRだけ検出されるので音も1回だけ(枠外のQRは読まらない=鳴らない)。
 // 使い方: node scripts/verify-scan-detect.mjs [baseUrl]
 import { chromium } from 'playwright-core'
 import pkg from '@zxing/library'
@@ -23,6 +24,24 @@ const browser = await chromium.launch({
   args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
 })
 const page = await browser.newPage()
+// 読み取り音(Web Audio の合成)を数えるため、AudioContext の oscillator をラップする
+// (ヘッドレスでは実音の出力を確認できないので、oscillator.start が呼ばれた=音を出した、を見る)
+await page.addInitScript(() => {
+  window.__beeps = 0
+  const AC = window.AudioContext || window.webkitAudioContext
+  if (!AC) return
+  const create = AC.prototype.createOscillator
+  AC.prototype.createOscillator = function () {
+    const osc = create.call(this)
+    const start = osc.start.bind(osc)
+    osc.start = (...args) => {
+      window.__beeps += 1
+      return start(...args)
+    }
+    return osc
+  }
+})
+const beepCount = () => page.evaluate(() => (window.__beeps ?? 0))
 
 await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
 await page.getByRole('button', { name: 'dev ログイン' }).click()
@@ -86,6 +105,13 @@ try {
 const listText = ok ? await page.textContent('.result-card').catch(() => '') : ''
 console.log(`detected url: ${page.url()}`)
 console.log(`result shows 渡辺健斗: ${listText.includes('渡辺健斗')}`)
-console.log(ok && listText.includes('渡辺健斗') ? 'verdict: OK(中央枠のQRのみ検出・実データ表示)' : 'verdict: FAIL')
+// 中央のQR(1004)だけ検出されたので音も1回だけ。左右のQRは照合枠の外=読まらないので鳴らない。
+const beeps = await beepCount()
+console.log(`読み取り音: ${beeps}音`)
+console.log(
+  ok && listText.includes('渡辺健斗') && beeps === 1
+    ? 'verdict: OK(中央枠のQRのみ検出・実データ表示・読み取り音は1回)'
+    : 'verdict: FAIL',
+)
 await browser.close()
 process.exit(ok && listText.includes('渡辺健斗') ? 0 : 1)

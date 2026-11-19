@@ -104,6 +104,14 @@ try {
   // 確認カードはカメラ枠の内側下部(QrScanner の overlay slot)に出る。枠の下に積むと
   // 390x640 でカードが bottom-nav に158px隠れてスクロールが必要だった(実測)ので、
   // 「枠の中 / nav の上 / ボタンが押せる」をここで固定する。
+  // 「記録」は busy の間 disabledになる(disabled は hit-test されない)ので、有効化されてから測る
+  await page.waitForFunction(() => {
+    const b = document.querySelector('.pending-card button')
+    return !!b && !b.disabled
+  }, undefined, { timeout: 15000 }).catch(() => {})
+  // スキャンの実際の位置(最上部)で測る(下にスクロールしたままだと画面外の座標を hit してしまう)
+  await page.evaluate(() => window.scrollTo(0, 0))
+  await page.waitForTimeout(200)
   const fit = await page.evaluate(() => {
     const p = document.querySelector('.pending-card')?.getBoundingClientRect()
     const box = document.querySelector('.scan-box')?.getBoundingClientRect()
@@ -115,6 +123,8 @@ try {
       insideCamera: !!(p && box && p.top >= box.top && p.bottom <= box.bottom + 1),
       aboveNav: !!(p && nav && p.bottom <= nav.top),
       recordHit: !!(btn && hit && btn.contains(hit)),
+      btnInViewport: !!(r && r.top >= 0 && r.bottom <= window.innerHeight),
+      hitTag: hit?.tagName ?? null,
       statusFirstMuted: document.querySelector('.muted')?.textContent?.includes('スキャン中') ?? false,
     }
   })
@@ -122,6 +132,7 @@ try {
   if (!fit.insideCamera) failures.push('確認カードがカメラ枠の内側に出ていない(縦を積んでいる)')
   if (!fit.aboveNav) failures.push('確認カードが bottom-nav に隠れる(スクロールが必要)')
   if (!fit.recordHit) failures.push('確認カードの「記録」ボタンが別の要素に押されている')
+  if (!fit.btnInViewport) failures.push('確認カードの「記録」が画面内に見えない(スクロールが必要)')
   if (!fit.statusFirstMuted) failures.push('画面上の最初の .muted がカメラの状態行でなくなっている')
 
   // 連続モードと違い、確認前に待機列へ勝手に積まない(誤読の安全弁)

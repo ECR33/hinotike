@@ -4,6 +4,8 @@
 // 「スキャン停止」ボタンで止めた場合はユーザーの意思なので再開しないことも確認する。
 // 戻った直後に手元の同じQRを再読して「戻る → 即結果」の往復にならないことも確認する
 // (照会モードも isSameScan の2.5秒窓で重複除外する)。
+// 読み取り音(「ピッ」)も同時に確認する: 検出成功で1音、窓内再読では増えない、
+// 管理欄の静音スイッチ OFF では読めても鳴らない、ON に戻すと鳴る。
 //
 //   node scripts/verify-scan-return.mjs [baseUrl]
 //
@@ -106,6 +108,27 @@ const framesReady = () => () => {
   return !!v && v.videoWidth > 0 && v.readyState >= 2
 }
 
+// 読み取り音(Web Audio 合成)を数えるため、AudioContext の oscillator をラップする。
+// ヘッドレスでは実音の出力を確認できないが、oscillator.start が呼ばれた=音を出した、が見える。
+await page.addInitScript(() => {
+  window.__beeps = 0
+  const AC = window.AudioContext || window.webkitAudioContext
+  if (!AC) return
+  const create = AC.prototype.createOscillator
+  AC.prototype.createOscillator = function () {
+    const osc = create.call(this)
+    const start = osc.start.bind(osc)
+    osc.start = (...args) => {
+      window.__beeps += 1
+      return start(...args)
+    }
+    return osc
+  }
+})
+const beepCount = () => page.evaluate(() => (window.__beeps ?? 0))
+/** 管理欄(details)を開く。summary を click すると開いているときは閉じるので、open を直接立てる。 */
+const openAdmin = () => page.locator('.admin-card').evaluate((el) => { el.open = true })
+
 const failures = []
 try {
   await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
@@ -129,6 +152,9 @@ try {
     .waitForFunction((code) => location.pathname === '/result' && location.search.includes(code), FIRST, { timeout: 20000 })
     .catch(() => failures.push(`1件目の照会結果(/result?code=${FIRST})に届かない`))
   await drawBlank()
+  // 1件目を読んだときに「ピッ」が1回だけ鳴った(音は検出成功の合図なので、遷移しても音は増えない)
+  console.log(`1件目の読み取り音: ${await beepCount()}音`)
+  if ((await beepCount()) !== 1) failures.push('1件目の読み取りで「ピッ」が1回鳴らない')
 
   await page.getByRole('link', { name: 'スキャンに戻る' }).click()
   await page.waitForFunction(() => location.pathname === '/scan', undefined, { timeout: 15000 })
@@ -154,6 +180,8 @@ try {
   } else {
     console.log('戻った直後に同じQRを2秒映した: /scan のまま(窓内の再読は無視)')
   }
+  // 窓内の再読は「読めた」ではないので音も増えない(誤読・再読でピッピッ鳴らない)
+  if ((await beepCount()) !== 1) failures.push('同じQRの窓内再読で音が増えた(読み取り成功以外で鳴っている)')
   await drawBlank()
 
   // 別のQRはそのまま読める(開始ボタンを押さずに)
@@ -163,6 +191,37 @@ try {
     .catch(() => failures.push(`戻った後に 2件目(${SECOND})が読めない`))
   console.log(`2件目の照会結果: ${await page.evaluate(() => location.search)}`)
   await drawBlank()
+  console.log(`2件目の読み取り音: ${await beepCount()}音(計)`)
+  if ((await beepCount()) !== 2) failures.push('2件目の読み取りで「ピッ」が増えない')
+
+  // 静音スイッチ(管理欄)を OFF にすると、読めても鳴らない
+  await page.getByRole('link', { name: 'スキャンに戻る' }).click()
+  await page.waitForFunction(() => location.pathname === '/scan', undefined, { timeout: 15000 })
+  await page.waitForFunction(scannerRunning(), undefined, { timeout: 15000 }).catch(() => failures.push('静音テスト前に再開していない'))
+  await openAdmin()
+  await page.getByRole('button', { name: /^読み取り音/ }).click()
+  console.log(`静音スイッチ: ${(await page.textContent('body').catch(() => '')).match(/読み取り音: (ON|OFF)/)?.[0] ?? ''}`)
+  await drawCode(FIRST)
+  await page
+    .waitForFunction((code) => location.pathname === '/result' && location.search.includes(code), FIRST, { timeout: 20000 })
+    .catch(() => failures.push('静音(OFF)にしても読み取り自体が効かない'))
+  await drawBlank()
+  const mutedBeeps = await beepCount()
+  console.log(`静音後の読み取り音: ${mutedBeeps}音(増えないはず)`)
+  if (mutedBeeps !== 2) failures.push('静音(OFF)でも音が鳴る(読み取り音スイッチが効いていない)')
+  // ON に戻して鳴ることを確認(次の実行や実使用で既定 ON のままにする)
+  await page.getByRole('link', { name: 'スキャンに戻る' }).click()
+  await page.waitForFunction(() => location.pathname === '/scan', undefined, { timeout: 15000 })
+  await page.waitForFunction(scannerRunning(), undefined, { timeout: 15000 }).catch(() => failures.push('静音解除前に再開していない'))
+  await openAdmin()
+  await page.getByRole('button', { name: /^読み取り音/ }).click()
+  await drawCode(SECOND)
+  await page
+    .waitForFunction((code) => location.pathname === '/result' && location.search.includes(code), SECOND, { timeout: 20000 })
+    .catch(() => failures.push('静音解除後に読み取りが効かない'))
+  await drawBlank()
+  console.log(`静音解除後の読み取り音: ${await beepCount()}音(3音目)`)
+  if ((await beepCount()) !== 3) failures.push('静音解除後に「ピッ」が鳴らない')
 
   // ユーザーの停止(スキャン停止ボタン)は自動再開しない
   await page.getByRole('link', { name: 'スキャンに戻る' }).click()

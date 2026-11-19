@@ -17,11 +17,15 @@
 //  - スキャン範囲の選択(50%/25%)はスキャン→結果→スキャンの往復とリロードで維持する。
 //  - スキャン範囲とライトの制御はカメラ枠の内側(右上)に置く。向ける先を決めている視線の
 //    すぐそこで操作するため(行として下に並べると制御を探すためにカメラから目が離れる)。
+//  - 読み取り成功で短い「ピッ」を鳴らす(app/utils/scanBeep.ts の Web Audio 合成。音声ファイル
+//    不要なのでオフラインモードでも鳴る)。同じコードの短時間再読(2.5s 窓)は鳴らない。
+//    静音の選び方は useState + localStorage で引き継ぐ(/scan の「管理」欄にスイッチがある)。
 //  - `overlay` slot(枠の内側下部)を親画面が渡すときだけパネルを載せる。確認モードの氏名確認は
 //    枠の下に積むと小さい画面で bottom-nav に隠れてスクロールが必要になるので、枠の内側に被せる
 //    (app/pages/scan.vue が pending card を渡す。/register は slot を渡らないので従来そのまま)。
 import { libraryScanRegion, CROP_FRAC, SMALL_CROP_FRAC } from '#shared/utils/qr-scan'
 import { isSameScan } from '#shared/utils/scan'
+import { playScanBeep, readBeepMutedFromStorage, unlockScanBeep, writeBeepMutedToStorage } from '~/utils/scanBeep'
 
 const props = defineProps<{ disabled?: boolean; busy?: boolean; continuous?: boolean }>()
 const emit = defineEmits<{ detected: [code: string] }>()
@@ -43,6 +47,13 @@ const mode = useState<'large' | 'small'>('qr-scan-mode', () => 'large')
 // ライト(torch)が使える場合のみライトボタンを出す(ライブラリの hasFlash 判定)。
 const flashAvailable = ref(false)
 const flashOn = ref(false)
+// 読み取り音の静音(この端末の選び方)。/scan の「管理」欄のスイッチが同じ state を触る。
+const beepMuted = useState<boolean>('qr-scan-beep-muted', () => false)
+/** 読み取りが確定した(= 窓内の再読ではない)ときだけ「ピッ」を鳴らす。 */
+function beepRead(): void {
+  if (beepMuted.value) return
+  playScanBeep()
+}
 
 const frac = computed(() => (mode.value === 'small' ? SMALL_CROP_FRAC : CROP_FRAC))
 // 照合の拡大倍率(nearest)。小さいQRのモジュールを3px程度にして精度を上げる。
@@ -153,6 +164,7 @@ function onDecode(result: { data: string }) {
     lastScan.value = { code, at: now }
     reads.value += 1
     status.value = statusText()
+    beepRead()
     emit('detected', code)
     return
   }
@@ -166,6 +178,7 @@ function onDecode(result: { data: string }) {
   lastScan.value = { code, at: now }
   handled = true
   stop()
+  beepRead()
   emit('detected', code)
 }
 
@@ -221,6 +234,13 @@ onMounted(async () => {
   // 保存されたスキャン範囲を復元(結果画面から戻った後も選択が維持される)。
   const saved = localStorage.getItem('qr-scan-mode')
   if (saved === 'small' || saved === 'large') mode.value = saved
+  // 静音の選び方を復元(SSR は localStorage を読めないため client で)。
+  beepMuted.value = readBeepMutedFromStorage()
+  // 音声はユーザー操作が無いと鳴らない(autoplay policy)。/scan は自動でスキャンを開始するので、
+  // 最初のタップ/キーで解放する(それ以前の検出は黙って鳴らない — 誤読音を出さないためにも正当)。
+  unlockScanBeep()
+  window.addEventListener('pointerdown', unlockScanBeep)
+  window.addEventListener('keydown', unlockScanBeep)
   // 「スキャン停止」で止めたまま画面を戻ってきたら自動再開しない(開始ボタンで解除する)。
   if (userStopped.value) {
     status.value = '停止しました。開始ボタンで再開できます。'
@@ -235,6 +255,8 @@ onMounted(async () => {
   void start()
 })
 
+watch(beepMuted, (muted) => writeBeepMutedToStorage(muted))
+
 watch(mode, (m) => {
   try {
     localStorage.setItem('qr-scan-mode', m)
@@ -244,6 +266,8 @@ watch(mode, (m) => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('pointerdown', unlockScanBeep)
+  window.removeEventListener('keydown', unlockScanBeep)
   stop()
 })
 
