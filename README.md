@@ -183,7 +183,10 @@ QR読み取りを「照会」ではなく「記録」にも使えるようにす
      **少なくとも1人**は必ずこの経路で登録しておく(QRによる許可運用には許可済みの利用者が必要)
  4. データセット(スプレッドシート)の定義(UI から発動 / `/sync`。設計: `docs/datasets.md`):
     - 取り込み定義は DB の `public.sync_sources`(**複数行**、1行 = 1データセット。マイグレーション 0007/0008)が正。
-      `/sync` 画面でスプレッドシート ID・ワークシート・code カラム・取り込みカラム(空 = 全カラム)・除外・
+      `/sync` 画面でスプレッドシート ID(**シートのリンクを貼れば ID を取り出します**。
+      `…/spreadsheets/d/<id>/edit#gid=…` の URL をそのまま貼れるので、ID 部分を選択して転記しなくてよい。
+      ID そのものも通る。リンクの `#gid=` はタブの内部 ID でワークシート名にならないため、タブ指定は
+      ワークシート名の欄で行う)・ワークシート・code カラム・取り込みカラム(空 = 全カラム)・除外・
       行フィルタ(有効レコードを表すカラム名 + 許容値のリスト。リスト空 = そのカラムの値が非空なら有効。カラム名空 = フィルタなし)・rename を編集し、
       「保存」→ そのデータセットの「プレビュー」→「このデータを端末に取り込み」の順で実行する
       (旧 `sync_settings` の singleton 行と items への upsert は撤去した — シートが唯一の正、データ本体は端末の IndexedDB)
@@ -221,7 +224,8 @@ QR読み取りを「照会」ではなく「記録」にも使えるようにす
 
     - 手動/CLI のシート確認(Worker を起動せずに取り込み結果を見る): `npm run sheets:preview`(tsx → `scripts/import-sheets.ts`)。
       **Supabase にデータは書かない**(シートが唯一の正で、行は端末に置く)。定義は `public.sync_sources` が正で、
-      行が無い/ID が空なら env の `GOOGLE_SPREADSHEET_ID` を使う。鍵は `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`(パス)か
+      行が無い/ID が空なら env の `GOOGLE_SPREADSHEET_ID`(ID かシートのリンクのどちらでも読める)を使う。
+      鍵は `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`(パス)か
       JSON 文字列の `GOOGLE_SERVICE_ACCOUNT_JSON`。`npm run sheets:preview:local` は `.env.development` が指す
       ローカル Supabase の定義を読む(`npm run sheets:dump -- --env <file> --source <id> --out <path>` で行を JSON に書く)。
       旧 `npm run sync:sheets`(シート → items の upsert)は撤去した
@@ -252,7 +256,7 @@ Workers + Assets としてデプロイする。`nodejs_compat` を有効にす�
   - vars: `NUXT_PUBLIC_SUPABASE_URL`(例 `https://<project-ref>.supabase.co`)、`NUXT_PUBLIC_APP_URL`(本番ホスト)
   - secrets: `NUXT_PUBLIC_SUPABASE_KEY`(publishable key で可)、`CF_API_TOKEN`(Workers を deploy できる権限の token)、`CF_ACCOUNT_ID`
   Actions から `wrangler secret put` はしない(鍵 JSON を Actions に載せないため)。
-- **定例のデプロイ(毎回手順を探さないための固定手順)**: 本番デプロイは `main` への push で Actions が走るので、必要な操作は「commit → push → 確認」の3つだけ。ローカルで `npm run deploy:cf` は実行しない(ローカルの wrangler ログインは期限切れになる上、CI が同じ commit をビルドして deploy 済みなので二重になる)。確認は `npm run deploy:status`(`scripts/deploy-status.mjs`: HEAD の SHA と `deploy.yml` のジョブを照合し、本番の `/api/health` を叩いて `OK(HEAD <sha> が本番に反映済み)` を出す)。ジョブが走っている間は `npm run deploy:status --wait` で待つ。ジョブが失敗したときは `gh run list --workflow=deploy.yml --limit 3` → `gh run view <id> --log`(ログが取れない環境では run の URL を開く)。DB のマイグレーション差分は `npx supabase migration list --remote=gfcqidgvrtxxosthulna` で確認し、差分があれば `npx supabase db push --remote=gfcqidgvrtxxosthulna --yes`(履歴のズレは `npx supabase migration repair 0001..0005 --status applied --remote=gfcqidgvrtxxosthulna --yes` で揃える)。Workers の Secret(`GOOGLE_SERVICE_ACCOUNT_JSON`)と同期設定(`sync_settings.spreadsheet_id`)はダッシュボード側なのでこのスクリプトは確認しない(必要なら `npx wrangler login` → `npx wrangler secret list`)。
+- **定例のデプロイ(毎回手順を探さないための固定手順)**: 本番デプロイは `main` への push で Actions が走るので、必要な操作は「commit → push → 確認」の3つだけ。ローカルで `npm run deploy:cf` は実行しない(ローカルの wrangler ログインは期限切れになる上、CI が同じ commit をビルドして deploy 済みなので二重になる)。確認は `npm run deploy:status`(`scripts/deploy-status.mjs`: HEAD の SHA と `deploy.yml` のジョブを照合し、本番の `/api/health` を叩いて `OK(HEAD <sha> が本番に反映済み)` を出す)。ジョブが走っている間は `npm run deploy:status --wait` で待つ。ジョブが失敗したときは `gh run list --workflow=deploy.yml --limit 3` → `gh run view <id> --log`(ログが取れない環境では run の URL を開く)。DB のマイグレーション差分は `npx supabase migration list --remote=gfcqidgvrtxxosthulna` で確認し、差分があれば `npx supabase db push --remote=gfcqidgvrtxxosthulna --yes`(履歴のズレは `npx supabase migration repair 0001..0005 --status applied --remote=gfcqidgvrtxxosthulna --yes` で揃える)。Workers の Secret(`GOOGLE_SERVICE_ACCOUNT_JSON`)とデータセット定義(`sync_sources` の行)はダッシュボード側なのでこのスクリプトは確認しない(必要なら `npx wrangler login` → `npx wrangler secret list`)。
 - 配信ドメイン: 本番ホストは `https://hinotike.hinogakuenpta.org`。Cloudflare ダッシュボードの Workers →
   `hinotike` → Settings → Custom domains に追加する(DNS レコードは自動作成される)。
   同じホストを `wrangler.jsonc` の `vars.NUXT_PUBLIC_APP_URL` と GitHub の vars `NUXT_PUBLIC_APP_URL` に書く。

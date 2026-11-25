@@ -25,6 +25,8 @@ import {
   sourceColumnFor,
   sourceFromDb,
   sourceToDb,
+  spreadsheetIdFrom,
+  spreadsheetIdWasParsedFromLink,
   type SyncRow,
   type SyncSource,
 } from '../../shared/utils/sync'
@@ -390,6 +392,59 @@ describe('isSafeSourceName / isSafeSpreadsheetId', () => {
     expect(isSafeSpreadsheetId('short')).toBe(false)
     expect(isSafeSpreadsheetId('id with space')).toBe(false)
     expect(isSafeSpreadsheetId(null)).toBe(false)
+  })
+})
+
+describe('spreadsheetIdFrom(ID そのもの・シートのリンクから取り出す)', () => {
+  const ID = '1tKjJnLk2tNxVWi0tuLs2VNi6zUYobnRa6kf0yffqUA8'
+
+  it('ID そのものはそのまま通る(転記済み入力は変えない)', () => {
+    expect(spreadsheetIdFrom(ID)).toBe(ID)
+    expect(spreadsheetIdFrom(`  ${ID}\n`)).toBe(ID)
+  })
+
+  it('共有ダイアログでコピーする edit リンクから ID を取り出す', () => {
+    expect(spreadsheetIdFrom(`https://docs.google.com/spreadsheets/d/${ID}/edit#gid=0`)).toBe(ID)
+    expect(spreadsheetIdFrom(`https://docs.google.com/spreadsheets/d/${ID}/edit?usp=sharing`)).toBe(ID)
+    expect(spreadsheetIdFrom(`https://docs.google.com/spreadsheets/d/${ID}/edit?gid=123#gid=123`)).toBe(ID)
+    // 末尾の `/` とクエリは ID の文字クラスに入らないので自然に切れる
+    expect(spreadsheetIdFrom(`https://docs.google.com/spreadsheets/d/${ID}/`)).toBe(ID)
+  })
+
+  it('u/<アカウント>/・export・htmlview の形も読める', () => {
+    expect(spreadsheetIdFrom(`https://docs.google.com/spreadsheets/u/1/d/${ID}/edit`)).toBe(ID)
+    expect(spreadsheetIdFrom(`https://docs.google.com/spreadsheets/d/${ID}/export/csv?gid=0`)).toBe(ID)
+    expect(spreadsheetIdFrom(`https://docs.google.com/spreadsheets/d/${ID}/htmlview`)).toBe(ID)
+  })
+
+  it('リンクが文章に埋まっていても拾う(「シート: https://…」をそのまま貼れる)', () => {
+    expect(spreadsheetIdFrom(`シート: https://docs.google.com/spreadsheets/d/${ID}/edit (共有済み)`)).toBe(ID)
+  })
+
+  it('シートのリンクではないものは空文字を返す(Forms のリンク・短い ID は保存しない)', () => {
+    expect(spreadsheetIdFrom('https://docs.google.com/forms/d/e/1FAIpQLSfAbcDef_1234567890/viewform')).toBe('')
+    expect(spreadsheetIdFrom('https://docs.google.com/spreadsheets/d/tooshort/')).toBe('')
+    expect(spreadsheetIdFrom('')).toBe('')
+    expect(spreadsheetIdFrom(null)).toBe('')
+    expect(spreadsheetIdFrom(undefined)).toBe('')
+  })
+
+  it('normalizeSource はリンクを ID に直して保存する(API の保存経路)', () => {
+    const src = normalizeSource({
+      name: '2026 本番',
+      spreadsheetId: `https://docs.google.com/spreadsheets/d/${ID}/edit#gid=0`,
+      codeColumn: 'ID',
+    })
+    expect(src.spreadsheetId).toBe(ID)
+    // 読み出せない入力は未設定(''= 取り込みは 400 で拒否)になる
+    expect(normalizeSource({ spreadsheetId: 'https://example.com/x' }).spreadsheetId).toBe('')
+  })
+
+  it('spreadsheetIdWasParsedFromLink はリンクのときだけ true(画面の案内用)', () => {
+    expect(spreadsheetIdWasParsedFromLink(`https://docs.google.com/spreadsheets/d/${ID}/edit`)).toBe(true)
+    expect(spreadsheetIdWasParsedFromLink(ID)).toBe(false)
+    expect(spreadsheetIdWasParsedFromLink('https://example.com/x')).toBe(false)
+    expect(spreadsheetIdWasParsedFromLink('')).toBe(false)
   })
 })
 

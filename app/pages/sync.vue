@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { describeApiError } from '#shared/utils/apiError'
 import type { MeState } from '#shared/utils/auth'
+import { spreadsheetIdFrom, spreadsheetIdWasParsedFromLink } from '#shared/utils/sync'
 import type { ImportPageResponse, SourceConfigResponse, SourcePreviewResponse, SyncSource } from '#shared/utils/sync'
 import { formatJst, type ScanConfigResponse } from '#shared/utils/scan'
 import { OFFLINE_ITEM_MAX, OFFLINE_PAGE_BATCH, type OfflineMeta } from '#shared/utils/offline'
@@ -44,6 +45,17 @@ const filterValues = ref('')
 const renameText = ref('')
 const enabledFlag = ref(true)
 
+/**
+ * 入力からスプレッドシート ID を解決する(shared/utils/sync の `spreadsheetIdFrom`)。
+ * 人間が読むのはシートへのリンクなので、`…/spreadsheets/d/<id>/…` のリンクをそのまま貼れば
+ * ID 部分を選択して転記しなくても済む。ID そのものもそのまま通る。
+ * server の `normalizeSource` も同じ関数を使うので、保存後の表示は ID になる。
+ * `#gid=` はワークシート(sheetId の数値)なのでワークシート名には使わない(別の欄で指定)。
+ */
+const resolvedSpreadsheetId = computed(() => spreadsheetIdFrom(spreadsheetId.value))
+/** リンクから拾ったときの案内(ID そのもののときは出さない)。 */
+const parsedFromLink = computed(() => spreadsheetIdWasParsedFromLink(spreadsheetId.value))
+
 function loadForm(source: SyncSource | null): void {
   if (!source) return
   name.value = source.name
@@ -86,7 +98,9 @@ function formPayload(source: SyncSource): SyncSource {
   return {
     ...source,
     name: name.value.trim() || source.name,
-    spreadsheetId: spreadsheetId.value.trim(),
+    // リンク文字列からも ID を解決して送る(server でも同じ正規化走るが、ドラフトのプレビュー
+    // 案内と送信値を一致させるためここで解決する)
+    spreadsheetId: resolvedSpreadsheetId.value,
     worksheet: worksheet.value.trim() || null,
     codeColumn: codeColumn.value.trim() || 'ID',
     includeColumns: parseList(includeColumns.value),
@@ -373,8 +387,23 @@ const mirrorLabel = computed(() => {
       <label class="label" for="dsName">表示名(選択に出る名前)</label>
       <input id="dsName" class="field" v-model="name" placeholder="例: 2026 本番のチケット" />
 
-      <label class="label" for="spreadsheetId">スプレッドシート ID</label>
-      <input id="spreadsheetId" class="field" v-model="spreadsheetId" placeholder="例: 1Abc-...-" />
+      <label class="label" for="spreadsheetId">スプレッドシート ID または シートのリンク</label>
+      <input
+        id="spreadsheetId"
+        class="field"
+        v-model="spreadsheetId"
+        placeholder="例: https://docs.google.com/spreadsheets/d/1Abc-…/edit#gid=0(ID だけでも可)"
+      />
+      <p v-if="parsedFromLink" class="muted">
+        リンクから ID を取り出しました: <span class="mono">{{ resolvedSpreadsheetId }}</span>
+      </p>
+      <p v-else-if="spreadsheetId.trim() && !resolvedSpreadsheetId" class="muted">
+        ID を読み出せません。シートのリンク(共有ダイアログでコピーできる URL)を貼るか、ID 部分を入力してください
+      </p>
+      <p class="muted">
+        リンクの <span class="mono">#gid=…</span> はタブの内部 ID で、ワークシート名にはなりません
+        (特定のタブを読む場合は下の「ワークシート名」で指定してください)
+      </p>
 
       <label class="label" for="worksheet">ワークシート名(空 = 最初のシート)</label>
       <input id="worksheet" class="field" v-model="worksheet" placeholder="フォームの回答 1" />
@@ -408,10 +437,10 @@ const mirrorLabel = computed(() => {
         <button class="btn secondary" type="button" :disabled="saving" @click="saveSources">
           {{ saving ? '保存中…' : '定義を保存' }}
         </button>
-        <button class="btn secondary" type="button" :disabled="previewing" @click="runPreview">
+        <button class="btn secondary" type="button" :disabled="previewing || !resolvedSpreadsheetId" @click="runPreview">
           {{ previewing ? '読み込み中…' : 'シートをプレビュー' }}
         </button>
-        <button class="btn" type="button" :disabled="importing || !spreadsheetId" @click="importToPhone">
+        <button class="btn" type="button" :disabled="importing || !resolvedSpreadsheetId" @click="importToPhone">
           {{ importing ? '取り込み中…' : 'このスマホに取り込む' }}
         </button>
         <button class="btn secondary" type="button" @click="removeSelected">このデータセットを削除</button>

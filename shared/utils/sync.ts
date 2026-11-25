@@ -78,9 +78,43 @@ export const DEFAULT_SOURCE: SyncSource = {
   updatedBy: null,
 }
 
+/** スプレッドシート ID の形: 英数字・ハイフン・アンダースコア(Google が発行する形, 10〜120文字)。 */
+const SPREADSHEET_ID_RE = /^[A-Za-z0-9_-]{10,120}$/
+
 /** スプレッドシート ID: 英数字・ハイフン・アンダースコア(Google が発行する形)。 */
 export function isSafeSpreadsheetId(name: unknown): name is string {
-  return typeof name === 'string' && /^[A-Za-z0-9_-]{10,120}$/.test(name)
+  return typeof name === 'string' && SPREADSHEET_ID_RE.test(name)
+}
+
+/**
+ * 入力からスプレッドシート ID を取り出す。
+ *
+ * 人間が読むのは「シートへのリンク」なので、ID の転記の手間を省くためにリンクからも出す
+ * (2026-11-26: 以前は ID 部分を選択してコピーするしかなく、手間と入力ミスがあった)。
+ * 受け付ける形:
+ * - ID そのもの(`isSafeSpreadsheetId`)
+ * - `…/spreadsheets/d/<id>`(edit・htmlview・export・プレビューなど後が続く形)
+ * - `…/spreadsheets/u/<n>/d/<id>`(マルチアカウントのリンク)
+ * リンクが文章の中に埋まっている(「シート: https://…」)ても拾う。末尾の `/`・クエリ・
+ * `#gid=`・閉じ括弧は ID の文字クラスに含まれないので自然に落ちる。
+ * 見つからなければ '' を返す(未設定 = 取り込みは 400 で拒否される。無効な値を保存しない)。
+ *
+ * `#gid=<数値>` はワークシートではなく sheetId(内部の数値ID)なので、ワークシート名には
+ * 使わない(ワークシート名は別の欄で指定する)。
+ */
+export function spreadsheetIdFrom(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  const s = raw.trim()
+  if (SPREADSHEET_ID_RE.test(s)) return s
+  const hit = s.match(/spreadsheets\/(?:u\/\d+\/)?d\/([A-Za-z0-9_-]{10,120})/)
+  return hit?.[1] ?? ''
+}
+
+/** `spreadsheetIdFrom` がリンクから拾ったか(=-ID そのものではない)をUIの案内に使う。 */
+export function spreadsheetIdWasParsedFromLink(raw: unknown): boolean {
+  if (typeof raw !== 'string') return false
+  const s = raw.trim()
+  return !SPREADSHEET_ID_RE.test(s) && spreadsheetIdFrom(s) !== ''
 }
 
 /** データセットの表示名(チップと UNIQUE キー用)。 */
@@ -94,11 +128,13 @@ export function isSafeSourceName(name: unknown): name is string {
  * UI/API から来た生データを正規化する。不正な値は DEFAULT にフォールバックする
  * (throw すると保存画面が固まるため、項目単位で補正する)。
  * spreadsheetId は空文字を許す(未設定 = 取り込み不可。API 側で 400 にする)。
+ * リンク文字列からも ID を取り出す(`spreadsheetIdFrom`): 人間はシートリンクを貼るので
+ * ID 部分を選択して転記する手間を省く(ID そのものはそのまま通る)。
  */
 export function normalizeSource(raw: Partial<SyncSource> | null | undefined): SyncSource {
   const base = DEFAULT_SOURCE
   const spreadsheetId =
-    typeof raw?.spreadsheetId === 'string' ? raw.spreadsheetId.trim() : ''
+    typeof raw?.spreadsheetId === 'string' ? spreadsheetIdFrom(raw.spreadsheetId) : ''
   const name = typeof raw?.name === 'string' ? raw.name.trim().slice(0, SOURCE_NAME_MAX_LENGTH) : ''
   return {
     id: typeof raw?.id === 'number' && Number.isInteger(raw.id) ? raw.id : null,

@@ -33,7 +33,7 @@ README の方針(シートが正・RLS は登録ユーザ・Supabase Secret key 
 |---|---|
 | `id serial primary key` | 画面の選択・モードの紐づけ・IndexedDB の key prefix に使う |
 | `name text not null unique` | 選択に出す表示名(重複は `normalizeSources` が最初の1つだけ残す) |
-| `spreadsheet_id text not null default ''` | 未設定(`''`)のときは取り込み・書き戻しは 400 で拒否 |
+| `spreadsheet_id text not null default ''` | 未設定(`''`)のときは取り込み・書き戻しは 400 で拒否。**保存時は ID かシートのリンクのどちらでも受け付ける**(`spreadsheetIdFrom` がリンクから ID を取り出して保存する。DB に載るのは ID のまま) |
 | `worksheet text` | null/空 = 最初のワークシート(`sheetTitleFor` は不一致時にも最初へフォールバック) |
 | `code_column text not null default 'ID'` | QR 照会キーになるヘッダー名(常に保持される) |
 | `include_columns text[]` | 空 = 全カラム。非空 = この許容リストのみ取り込む |

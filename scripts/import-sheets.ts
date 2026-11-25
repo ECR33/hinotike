@@ -30,6 +30,7 @@ import {
   payloadKeysOf,
   sheetTitleFor,
   sourceFromDb,
+  spreadsheetIdFrom,
   type SyncSource,
 } from '../shared/utils/sync.ts'
 
@@ -105,7 +106,8 @@ async function main() {
     .map((row) => sourceFromDb(row as Record<string, unknown>))
     .filter((s): s is SyncSource => s !== null)
   if (sources.length === 0) {
-    sources = [{ ...DEFAULT_SOURCE, spreadsheetId: env.GOOGLE_SPREADSHEET_ID ?? '' }]
+    // env の指定は ID でもシートのリンクでも同じように読める(人間はリンクを貼る)
+    sources = [{ ...DEFAULT_SOURCE, spreadsheetId: spreadsheetIdFrom(env.GOOGLE_SPREADSHEET_ID ?? '') }]
     console.warn(`sync_sources の行がありません(既定の1データセットで試します)`)
   }
 
@@ -125,7 +127,7 @@ async function main() {
   for (const source of sources) {
     console.log(`\n── データセット ${source.id ?? '-'} "${source.name}"${source.enabled ? '' : ' (無効)'} ──`)
     if (!source.spreadsheetId) {
-      console.log('  スプレッドシート ID が未設定(取り込み不可)。/sync の設定で入力してください')
+      console.log('  スプレッドシート ID が未設定(取り込み不可)。/sync でシートのリンクを貼るか、sync_sources の spreadsheet_id を設定してください')
       continue
     }
 
