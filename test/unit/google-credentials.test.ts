@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { unlink, writeFile } from 'node:fs/promises'
 import {
   envCandidates,
   normalizePrivateKey,
@@ -48,10 +51,23 @@ describe('readServiceAccountKey(鍵の解決)', () => {
   })
 
   it('GOOGLE_SERVICE_ACCOUNT_JSON_PATH はファイルから読む(dev・CLI の経路)', async () => {
-    // リポジトリの実鍵ファイルを使う(内容の検証はしない: client_email が読めることだけ見る)
-    process.env.GOOGLE_SERVICE_ACCOUNT_JSON_PATH = './scripts/service-account.json'
-    const key = await readServiceAccountKey()
-    expect(key?.client_email).toMatch(/@.*gserviceaccount\.com$/)
+    // `scripts/service-account.json` は gitignored なので CI に無い。テストは一時ファイルを作る
+    // (readKeyFile は process.cwd() 基準の相対パスを解決するので、絶対パスでも読める)
+    const file = join(tmpdir(), `hinotike-key-${process.pid}.json`)
+    await writeFile(file, JSON.stringify(KEY))
+    try {
+      process.env.GOOGLE_SERVICE_ACCOUNT_JSON_PATH = file
+      const key = await readServiceAccountKey()
+      expect(key?.client_email).toBe(KEY.client_email)
+      expect(key?.private_key).toContain('PRIVATE KEY')
+    } finally {
+      await unlink(file)
+    }
+  })
+
+  it('PATH が存在しないファイルを指すときは null(dev でパスを消したとき)', async () => {
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON_PATH = join(tmpdir(), `hinotike-missing-${process.pid}.json`)
+    expect(await readServiceAccountKey()).toBe(null)
   })
 
   it('env に何も無いときは null(API 側で 400 の案内になる)', async () => {
