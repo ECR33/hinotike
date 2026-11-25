@@ -1,17 +1,18 @@
-import type { SyncConfigResponse } from '#shared/utils/sync'
+import type { SourceConfigResponse } from '#shared/utils/sync'
 import { readServiceAccountKey } from '../utils/googleSheets'
+import { loadSources } from '../utils/syncRun'
 
 /**
- * 同期設定の取得。登録済みユーザ(requireRegisteredUser)のみ。
- * 設定は DB(public.sync_settings の id=1 行)。行が無い場合は既定値を返す(rowMissing=true)。
- * サービスアカウント鍵の有無も一緒に返す(未設定なら同期実行不可の案内用)。
+ * データセット(取り込み定義)の一覧。登録済みユーザ(requireRegisteredUser)のみ。
+ * 定義は DB(public.sync_sources の**複数行**)。行が無い場合は既定値を返す(rowMissing=true)。
+ * サービスアカウント鍵の有無も一緒に返す(未設定なら取り込み・書き戻し不可の案内用)。
  */
-export default defineEventHandler(async (event): Promise<SyncConfigResponse> => {
+export default defineEventHandler(async (event): Promise<SourceConfigResponse> => {
   await requireRegisteredUser(event)
 
-  const loaded = await loadSyncSettings(event)
+  const loaded = await loadSources(event)
   return {
-    settings: loaded.settings,
+    sources: loaded.sources,
     serviceAccountConfigured: readServiceAccountKey() !== null,
     updatedBy: loaded.updatedBy,
     updatedAt: loaded.updatedAt,

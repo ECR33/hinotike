@@ -1,30 +1,37 @@
 import type { ScanConfigResponse } from '#shared/utils/scan'
 import { readServiceAccountKey } from '../utils/googleSheets'
 import { loadScanModes, readSheetHeaders } from '../utils/scanRun'
-import { loadSyncSettings } from '../utils/syncRun'
+import { findSourceOrNull, loadSources, firstSource } from '../utils/syncRun'
 
 /**
- * 記録モードの取得。登録済みユーザ(requireRegisteredUser)のみ。
+ * 記録モードの取得 + データセット一覧。登録済みユーザ(requireRegisteredUser)のみ。
  * 設定は DB(public.scan_modes)の行。行が無い場合は既定プリセットを返す(rowMissing=true)。
- * シートの取り込みカラム(include_columns)も返す(記録列が取り込み対象に無いときの注記用 —
- * 次回同期は payload を丸ごと書き換えるので、取り込み対象に無い列の記録は payload から消える)。
- * シートの実ヘッダー(sheetHeaders)も返す(設定画面の「シートに列が無い」判定用。読み取り失敗は null)。
+ * データセット(public.sync_sources の複数行)も一緒に返す(/scan の「どのデータの作業か」の選択の根)。
+ * シートの実ヘッダー(sheetHeaders)は ?sourceId= のシートを読む(未指定は有効な最初のシート)。
+ * 読み取り失敗は null(モード取得を止めない = lookup と同じ方針)。
  */
 export default defineEventHandler(async (event): Promise<ScanConfigResponse> => {
   await requireRegisteredUser(event)
 
+  const query = getQuery(event)
+  const askedId = typeof query.sourceId === 'string' ? Number(query.sourceId) : Number(query.sourceId ?? NaN)
+
   const loaded = await loadScanModes(event)
-  // 取り込みカラムの読み込み失敗はモード取得を止めない(注記だけ出せればよい。lookup と同じ方針)
-  const syncSettings = await loadSyncSettings(event)
-    .then((r) => r.settings)
-    .catch(() => null)
-  const sheet = await readSheetHeaders(event, syncSettings)
+  const sources = await loadSources(event)
+    .then((r) => r.sources)
+    .catch(() => [])
+
+  const target = Number.isInteger(askedId) && askedId > 0
+    ? await findSourceOrNull(event, askedId)
+    : await firstSource(event).catch(() => null)
+  const sheet = await readSheetHeaders(event, target)
 
   return {
     modes: loaded.modes,
+    sources,
     serviceAccountConfigured: readServiceAccountKey() !== null,
-    syncIncludeColumns: syncSettings?.includeColumns ?? [],
     rowMissing: loaded.rowMissing,
+    sourceMissing: Number.isInteger(askedId) && askedId > 0 && target === null,
     sheetTitle: sheet?.title ?? null,
     sheetHeaders: sheet?.headers ?? null,
   }

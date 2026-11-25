@@ -1,47 +1,55 @@
-import { productOrderKeys } from '#shared/utils/items'
-import { loadSyncSettings } from '../utils/syncRun'
+import { readBody } from 'h3'
+import { ITEM_NAME_KEY, productOrderKeys } from '#shared/utils/items'
+import { parseRegistrationCode } from '#shared/utils/registration'
+import { SCAN_CODE_MAX_LENGTH } from '#shared/utils/scan'
+import { datasetFromSource, resolveSource } from '../utils/dataset'
 
 /**
- * QR コードの値で items テーブルを照会する。
- * 前提: Google 認証済み + users テーブルへの紐付け。
- * 判定は server/utils/authguard(requireRegisteredUser)に集約し、
- * RLS の is_registered_user() と同じ根で確認する(session+users 二重照会の重複を撤去)。
- * 商品欄の表示順(productOrder)は同期設定(public.sync_settings の include_columns の並び)から
- * 作る。設定の読み込み失敗は照会自体を止めない([] = 画面側がフォールバックの並びを使う)。
+ * QR コードの値で**シート**を照会する(1行 = code + payload)。登録済みユーザのみ。
+ * 前提: Google 認証済み + users テーブルへの紐付け(判定は server/utils/authguard)。
+ *
+ * 対象シートは body の sourceId(未指定は有効な最初のデータセット)。画面(/result)は
+ * 取り込み済みのデータセットの id を送る(端末ミラーの照会と同じシートを照会する)。
+ * 商品欄の表示順(productOrder)はそのデータセットの includeColumns の並びから作る。
+ * 利用者登録QR(hinotike-registration:)は照会対象ではないので 400 で拒否する(黙って not_found にしない)。
  */
-export default defineEventHandler(async (event) => {
-  const { supabase } = await requireRegisteredUser(event)
+export interface LookupResponse {
+  found: boolean
+  code: string
+  row: { code: string; payload: Record<string, string> } | null
+  productOrder: string[]
+  sourceId: number
+  sheetTitle: string
+}
 
-  const body = await readBody<{ code?: unknown }>(event)
+export default defineEventHandler(async (event): Promise<LookupResponse> => {
+  await requireRegisteredUser(event)
+
+  const body = await readBody<{ code?: unknown; sourceId?: unknown }>(event)
   const code = String(body?.code ?? '').trim()
   if (!code) {
     throw createError({ statusCode: 400, statusMessage: 'code is required' })
   }
-
-  const { data, error } = await supabase
-    .from('items')
-    .select('*')
-    .eq('code', code)
-    .maybeSingle()
-
-  if (error) {
-    console.error('[lookup] items:', error.message)
-    throw createError({ statusCode: 500, statusMessage: 'items lookup failed' })
+  if (code.length > SCAN_CODE_MAX_LENGTH) {
+    throw createError({ statusCode: 400, statusMessage: `code は ${SCAN_CODE_MAX_LENGTH} 文字まで` })
+  }
+  if (parseRegistrationCode(code)) {
+    throw createError({ statusCode: 400, statusMessage: '利用者登録用のQRです(チケットコードをスキャンしてください)' })
   }
 
-  // 商品表示順(同期設定の include_columns の並び → rename 適用後の個数キー)。失敗しても照会は返す。
-  let productOrder: string[] = []
-  try {
-    const { settings } = await loadSyncSettings(event)
-    productOrder = productOrderKeys(settings.includeColumns, settings.rename)
-  } catch (e: unknown) {
-    console.error('[lookup] sync_settings:', e instanceof Error ? e.message : String(e))
-  }
+  const source = await resolveSource(event, body?.sourceId)
+  const dataset = await datasetFromSource(event, source)
+  const row = dataset.rows.find((r) => r.code === code) ?? null
+
+  // 商品表示順(取り込み定義の includeColumns の並び → rename 適用後の個数キー)
+  const productOrder = productOrderKeys(source.includeColumns, source.rename)
 
   return {
-    found: data != null,
+    found: row !== null,
     code,
-    row: data,
+    row,
     productOrder,
+    sourceId: source.id ?? 0,
+    sheetTitle: dataset.sheetTitle,
   }
 })

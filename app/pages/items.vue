@@ -72,8 +72,10 @@ import {
   type KeyFilter,
   type RemarkState,
 } from '#shared/utils/items'
-import { offlineFacets, offlineItemsQuery, offlineKeys } from '#shared/utils/offline'
+import { describeApiError } from '#shared/utils/apiError'
+import { mirrorBelongsToUser, offlineFacets, offlineItemsQuery, offlineKeys } from '#shared/utils/offline'
 import { formatJst } from '#shared/utils/scan'
+import type { MeState } from '#shared/utils/auth'
 import type { OfflineItemRow } from '~/utils/offlineStore'
 
 interface ItemsPage {
@@ -180,6 +182,13 @@ const loading = ref(false)
 /** 入力の確定待ち(デバウンス中)。行の追記中と区別して「検索中…」を出す。 */
 const pending = ref(false)
 const errorMessage = useState<string | null>('items-error', () => null)
+/**
+ * 開発者向けの素のメッセージ(サーバの `message` + リクエスト行 + 下情報)。
+ * 日本語の `statusMessage` は HTTP status line で h3 が ASCII に sanitize するため、
+ * e.message だけを見ると `400 "" ID ()` のように欠ける。案内は `describeApiError` の
+ * friendly(理由コード or body の message から作る)を使い、素の文言は折りたたみに出す。
+ */
+const errorDetail = useState<string | null>('items-error-detail', () => null)
 
 /** 年・組の選択肢。SSR で解決して hydration に引き継ぐ(items 全体のスキャンなので条件に依存しない)。 */
 const facets = useState<ItemsFacets | null>('items-facets', () => null)
@@ -190,26 +199,39 @@ const keysState = useState<ItemsKeysResponse | null>('items-keys', () => null)
 const keysError = useState<string | null>('items-keys-error', () => null)
 
 /**
- * オフラインモード(/scan の「オフラインモード準備」で有効になる)。
+ * ローカルデータセット(/scan の「データの取り込み」で有効になる)。
  * useOfflineState は onMounted で localStorage のメタを引き当てる(SSR は読めない)。
- * 一覧・facets・項目キーはスナップショットからローカルで解決する(通信しない)。
+ * 一覧・facets・項目キーは端末内のミラー(**作業中のデータセット**の行)からローカルで解決する(通信しない)。
  */
-const { meta: offlineMeta, enabled: offlineEnabled } = useOfflineState()
-/** 最後の一覧ページがローカルスナップショット由来か(注記の表示用)。 */
+const { meta: offlineMeta, localWork, uidMismatch } = useOfflineState()
+/** 認証状態(SSR が埋め込む)。ミラーの uid と比較して別利用者の端末データの一覧表示を防ぐ。 */
+const authState = useState<MeState | null>('auth-state', () => null)
+/** 一覧・facets・項目キーの解決が端末ミラー由来か(注記の表示用)。 */
 const offlineLookup = ref(false)
-/** スナップショット全行のローカル缓存(ページ追記ごとに getAll を打ち直さない)。 */
+/** ミラー全行のローカル缓存(ページ追記ごとに getAll を打ち直さない)。 */
 let offlineRowsCache: OfflineItemRow[] | null = null
-watch([offlineEnabled, () => offlineMeta.value?.snapshotAt], () => {
-  offlineRowsCache = null // 解除・再準備でスナップショットが変われば缓存を捨てる
+watch([localWork, () => offlineMeta.value?.snapshotAt, () => offlineMeta.value?.sourceId], () => {
+  offlineRowsCache = null // 解除・再取り込み・データセットの切替でミラーが変われば缓存を捨てる
 })
 async function offlineRowsAll(): Promise<OfflineItemRow[]> {
-  if (!offlineRowsCache) offlineRowsCache = await offlineGetAllItems()
+  const sourceId = offlineMeta.value?.sourceId
+  if (sourceId == null) return [] // 未取り込み = ローカル解決できない(API 側で解決する)
+  if (!offlineRowsCache) offlineRowsCache = await offlineGetAllItems(sourceId)
   return offlineRowsCache
+}
+/**
+ * 端末ミラーで解決できるか(client のみ・有効フラグ + **uid 一致**)。
+ * 同期読みで generation の競合処理と組み合わせて使える(別利用者のミラーの氏名を一覧に出さない)。
+ */
+function localMirrorActive(): boolean {
+  if (!import.meta.client) return false
+  const m = readOfflineMetaFromStorage()
+  return m?.enabled === true && mirrorBelongsToUser(m, authState.value?.uid)
 }
 const offlineSnapshotLabel = computed(() => {
   const m = offlineMeta.value
-  if (!m) return 'スナップショット'
-  return `準備 ${formatJst(m.snapshotAt)}・${m.itemCount}件${m.capped ? '(上限で打ち切り)' : ''}`
+  if (!m) return '端末内のデータ'
+  return `"${m.sourceName}" 取り込み ${formatJst(m.snapshotAt)}・${m.itemCount}件${m.capped ? '(上限で打ち切り)' : ''}`
 })
 
 /** 項目欄に並べるキー(年・組・氏名・備考は専用欄があるので二重コントロールにしない)。 */
@@ -288,11 +310,13 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
 
   loading.value = true
   errorMessage.value = null
+  errorDetail.value = null
   try {
-    // オフラインモード: /api/items-list を呼ばず、スナップショットから**同じ意味**で絞り込み+分页する
-    // (offlineItemsQuery は items-list の PostgREST 照合をローカルで再現する。localStorage は同期読みで
+    // この端末のデータで作業しているとき: /api/items-list を呼ばず、端末内のミラーから**同じ意味**で絞り込み+分页する
+    // (offlineItemsQuery は items-list の照合意味をローカルで再現する。localStorage は同期読みで
     // generation の競合処理と組み合わせて「解除された直後の追記」がオンラインに戻るようにする)。
-    const offline = import.meta.client && readOfflineMetaFromStorage()?.enabled === true
+    // uid 一致も条件: 別利用者が取り込んだミラーの氏名を一覧に出さない(通信の API 照会に戻る)。
+    const offline = localMirrorActive()
     const page = offline
       ? offlineItemsQuery(
           await offlineRowsAll(),
@@ -325,6 +349,8 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
             filters: keyFiltersApplied.length ? serializeKeyFilters(keyFiltersApplied) : undefined,
             cursor: cur ?? undefined,
             limit: ITEM_PAGE_SIZE,
+            // 作業中のデータセット(未指定は server が有効な最初のデータセットを選ぶ)
+            sourceId: activeSourceIdForRequest(),
           },
           headers: useRequestHeaders(['cookie']),
         })
@@ -349,42 +375,46 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
     }
   } catch (e: unknown) {
     if (gen !== generation) return
-    errorMessage.value = e instanceof Error ? e.message : String(e)
+    const view = describeApiError(e)
+    errorMessage.value = view.friendly
+    errorDetail.value = view.raw || null
     done.value = true // 失敗した以上これ以上の追記はできない
   } finally {
     if (gen === generation) loading.value = false
   }
 }
 
-/** 年・組の選択肢を取得する(失敗しても一覧は出せるので facetError だけ立てる)。オフラインはスナップショットから導出する。 */
+/** 年・組の選択肢を取得する(失敗しても一覧は出せるので facetError だけ立てる)。この端末のデータならミラーから導出する。 */
 async function loadFacets(): Promise<void> {
   facetError.value = null
   try {
-    if (import.meta.client && readOfflineMetaFromStorage()?.enabled) {
+    if (localMirrorActive()) {
       facets.value = offlineFacets(await offlineRowsAll())
       return
     }
     facets.value = await $fetch<ItemsFacets>('/api/items-facets', {
+      query: { sourceId: activeSourceIdForRequest() },
       headers: useRequestHeaders(['cookie']),
     })
   } catch (e: unknown) {
-    facetError.value = e instanceof Error ? e.message : String(e)
+    facetError.value = describeApiError(e).friendly
   }
 }
 
-/** 任意項目(payload キー)の発見結果を取得する(失敗しても一覧と他の欄は出せるので keysError だけ立てる)。オフラインはスナップショットの payload から導出する(設定由来の「載る予定」キーは出ない)。 */
+/** 任意項目(payload キー)の発見結果を取得する(失敗しても一覧と他の欄は出せるので keysError だけ立てる)。この端末のデータならミラーの payload から導出する(定義由来の「載る予定」キーは出ない)。 */
 async function loadKeys(): Promise<void> {
   keysError.value = null
   try {
-    if (import.meta.client && readOfflineMetaFromStorage()?.enabled) {
+    if (localMirrorActive()) {
       keysState.value = offlineKeys(await offlineRowsAll())
       return
     }
     keysState.value = await $fetch<ItemsKeysResponse>('/api/items-keys', {
+      query: { sourceId: activeSourceIdForRequest() },
       headers: useRequestHeaders(['cookie']),
     })
   } catch (e: unknown) {
-    keysError.value = e instanceof Error ? e.message : String(e)
+    keysError.value = describeApiError(e).friendly
   }
 }
 
@@ -617,9 +647,22 @@ async function loadMore(): Promise<void> {
 }
 
 /**
- * オフラインモードのとき、hydration で引き継いだ**オンライン時の缓存**(1ページ目・facets・項目キー)を
- * スナップショット由来に打ち直す。缓存 HTML のデータは準備時点とズレていることがあるので
- * IDB から読み直してから追記を続ける。
+ * リクエストに送る**作業中のデータセット**の id。
+ * - 取り込み済みならメタの sourceId(ローカル照合と同じシートを照会する)
+ * - 未取り込みは localStorage の選択(/scan・/scan-settings で選んだもの)。未設定は undefined = server が有効な最初のデータセットを選ぶ
+ * SSR は storage を読めないため undefined(= 既定のデータセット)。client のマウント後に選択データセットへ打ち直す。
+ */
+function activeSourceIdForRequest(): number | undefined {
+  if (!import.meta.client) return undefined
+  const meta = readOfflineMetaFromStorage()
+  // 取り込み済みでも **uid 一致**の時だけメタの sourceId を使う(別利用者のミラーのシートを照会しない)
+  if (meta?.enabled && mirrorBelongsToUser(meta, authState.value?.uid)) return meta.sourceId
+  return readActiveSourceFromStorage() ?? undefined
+}
+
+/**
+ * この端末のデータで作業しているとき、hydration で引き継いだ**オンライン時の缓存**(1ページ目・facets・項目キー)を
+ * 端末内のデータ由来に打ち直す。缓存 HTML のデータは取り込み時点とズレていることがあるので IDB から読み直してから追記を続ける。
  */
 async function reloadOffline(): Promise<void> {
   try {
@@ -630,14 +673,34 @@ async function reloadOffline(): Promise<void> {
     keysError.value = null
     offlineLookup.value = true
   } catch {
-    // IDB が無い・壊れている場合 facets/keys は缓存のまま。load のオフライン分岐が errorMessage を出す。
+    // IDB が無い・壊れている場合 facets/keys は缓存のまま。load のローカル分岐が errorMessage を出す。
   }
   await load({ reset: true, initial: true })
 }
 
+/** 未取り込みだが選択データセットがあるとき、SSR が既定のデータセットで解いた1ページ目を選び直したデータセットで打ち直す。 */
+async function reloadForSelectedSource(): Promise<void> {
+  await load({ reset: true, initial: true })
+  await loadFacets()
+  await loadKeys()
+}
+
+// uid が後から解決される(缓存 HTML を開いた等で auth-state が未解決)場合、ミラー由来の解決に切り替える。
+watch(localWork, (ok) => {
+  if (ok) void reloadOffline()
+})
+
 onMounted(() => {
   ioSupported.value = typeof IntersectionObserver === 'function'
-  if (offlineEnabled.value) void reloadOffline()
+  if (localWork.value) {
+    void reloadOffline()
+  } else if (offlineMeta.value?.enabled) {
+    // ミラーがあるが uid が一致しない(別利用者のデータ)・uid 未解決: 通信の照会を読み直す(API は登録ユーザのシートを読む)
+    void reloadForSelectedSource()
+  } else if (readActiveSourceFromStorage() !== null) {
+    // SSR は storage を読めない(既定のデータセットで解く)。選中のデータセットがあれば打ち直す。
+    void reloadForSelectedSource()
+  }
   // 行に表示するキーを localStorage から復元(表示設定。URL の初期指定があればそちらを優先する)。
   if (!showKeys.value.length) {
     try {
@@ -985,11 +1048,22 @@ await Promise.all(initialLoads)
         <span v-else>{{ total }} 件中 {{ rows.length }} 件表示</span>
       </p>
       <p v-if="offlineLookup" class="muted offline-note">
-        オフラインのスナップショット({{ offlineSnapshotLabel }})から一覧を表示しています。復旧後はデータが古い場合があります。年・組・項目の選択肢もスナップショットから生成しています(同期設定由来の「載る予定」の項目は復旧後に現れます)。
+        この端末のデータ({{ offlineSnapshotLabel }})から一覧を表示しています。シートが正なので、取り込み後にシート側で変わった値は次の取り込みまで現れません。年・組・項目の選択肢もこの端末のデータから生成しています(取り込み定義に載る予定の項目は次の取り込みで現れます)。
+      </p>
+      <p v-if="uidMismatch" class="error">
+        この端末のデータは別の利用者が取り込んだものです(氏名・備考を含むため一覧には出しません)。通信の照会を読み直しています。
       </p>
     </div>
 
-    <div v-if="errorMessage" class="error card">{{ errorMessage }}</div>
+    <div v-if="errorMessage" class="error card">
+      <p>{{ errorMessage }}</p>
+      <!-- 開発者向けの素のメッセージ(サーバの message + リクエスト行 + 下情報)。
+           通常は畳むので、運用者には上の案内だけ見える。dev のコンソールと突き合わせられる。 -->
+      <details v-if="errorDetail" class="error-detail">
+        <summary>詳細(開発者向け)</summary>
+        <code class="error-raw">{{ errorDetail }}</code>
+      </details>
+    </div>
 
     <div class="card">
       <ul v-if="rows.length" class="item-list">
@@ -1016,6 +1090,26 @@ await Promise.all(initialLoads)
 </template>
 
 <style scoped>
+/* エラーの案内カード: 本文はユーザ向け文言、下は開発者向けの素のメッセージ(折りたたみ) */
+.error-detail {
+  margin-top: 8px;
+}
+
+.error-detail summary {
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.error-raw {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
 .search-row {
   display: flex;
   flex-direction: column;

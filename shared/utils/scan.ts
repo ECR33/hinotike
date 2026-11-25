@@ -2,12 +2,16 @@
  * スキャンの「記録モード」の共通ロジック(純粋関数)。
  *
  * 設定は DB(public.scan_modes)が正。doc/docs/scan-modes.md の設計に対応する。
- * - モード = 1行。/scan の「新しい記録を作る」と管理欄から動的に増減する。
+ * - モード = 1行。**1つのデータセット(public.sync_sources の行)に紐づく**。記録列名はシート固有なので、
+ *   複数シートを扱うようになった今は mode ごとに sourceId を持つ(2026-11-22 の複数データセット化)。
+ * - モードは /scan の「新しい記録を作る」と管理欄から動的に増減する。
  * - actions = 書くカラムの組(済/未フラグ列 + 日時列)。シートヘッダー名は rename 前の実名
  *   (remark-update と同じ基準。payload キーは rename/rename 前名どちらでも指定できる)。
+ * - payload キーは**スマホ内のミラー**(IndexedDB)に写す。Supabase の items テーブルは使わない。
  * - 証跡(scan_events)は「いつ・誰が・どのモードで・何を書いたか」の履歴。シートセルは1値しか残らない。
  * Nuxt 依存の import は置かない(server / shared / CLI どちらでも読めるように)。
  */
+import type { SyncSource } from './sync'
 
 /** 済/未 フラグ列に書く既定の値(未に戻す = 空文字でクリア)。 */
 export const SCAN_FLAG_VALUE = '済'
@@ -56,6 +60,8 @@ export interface ScanAction {
 export interface ScanMode {
   /** 未作成(新規)は null。DB の serial id */
   id: number | null
+  /** このモードが書き込むデータセット(public.sync_sources の id)。null = 未設定(API は 400 にする) */
+  sourceId: number | null
   name: string
   actions: ScanAction[]
   dedupe: ScanDedupe
@@ -68,17 +74,20 @@ export interface ScanMode {
   updatedBy: string | null
 }
 
-/** /api/scan-config の応答(取得・保存で同じ形を返す)。 */
+/** /api/scan-config の応答(取得・保存で同じ形を返す。?sourceId= を渡すとそのシートの実測も添える)。 */
 export interface ScanConfigResponse {
   modes: ScanMode[]
+  /** データセット(取り込み定義)の一覧。/scan の「どのデータの作業か」の選択と取り込みの根 */
+  sources: SyncSource[]
   /** サービスアカウント鍵がサーバー側に設定されているか(列作成・書き込みはこれが必要) */
   serviceAccountConfigured: boolean
-  /** シートの取り込みカラムに無い記録列の注記用(黙って payload が消える状態を作らない) */
-  syncIncludeColumns: string[]
+  /** scan_modes の行が 0(シード未投入)。UI は既定プリセットを表示する */
   rowMissing: boolean
-  /** シートを読み取れたときのワークシート名(設定画面の注記用。読み取り失敗・未設定は null) */
+  /** query の sourceId が DB に無い(API は黙って null を返す。画面は「ソースが見つかりません」を出す) */
+  sourceMissing: boolean
+  /** 対象シートを読み取れたときのワークシート名(設定画面の注記用。読み取り失敗・未設定は null) */
   sheetTitle: string | null
-  /** シートの実際のヘッダー名(設定画面の「シートに列が無い」判定用。null は不明) */
+  /** 対象シートの実際のヘッダー名(設定画面の「シートに列が無い」判定用。null は不明) */
   sheetHeaders: string[] | null
 }
 
@@ -98,7 +107,7 @@ export function modeColumnsMissing(mode: ScanMode, headers: string[] | null | un
   return modeColumns(mode).filter((name) => !headers.includes(name))
 }
 
-/** 取り込みカラム(include_columns)に載っていない列。載せないと次の同期で payload から消える。 */
+/** 取り込みカラム(include_columns)に載っていない列。載せないと次の取り込みで端末のミラーに載らない。 */
 export function modeColumnsOutsideInclude(mode: ScanMode, includeColumns: string[]): string[] {
   if (includeColumns.length === 0) return []
   return modeColumns(mode).filter((name) => !includeColumns.includes(name))
@@ -139,6 +148,9 @@ export function normalizeScanMode(raw: Partial<ScanMode> | null | undefined): Sc
   if (!raw || typeof raw !== 'object') return null
   const name = cleanName(raw.name, SCAN_MODE_NAME_MAX_LENGTH)
   if (!name) return null
+  // sourceId は DB(camel の JSON と snake の jsonb 両方許容)・画面のどちらでも読む(未設定は null)
+  const rawSource = (raw as Record<string, unknown>).sourceId ?? (raw as Record<string, unknown>).source_id
+  const sourceId = typeof rawSource === 'number' ? rawSource : Number(rawSource)
   const actions: ScanAction[] = []
   const seen = new Set<string>()
   for (const item of Array.isArray(raw.actions) ? raw.actions : []) {
@@ -151,6 +163,7 @@ export function normalizeScanMode(raw: Partial<ScanMode> | null | undefined): Sc
   if (actions.length === 0) return null
   return {
     id: typeof raw.id === 'number' && Number.isInteger(raw.id) ? raw.id : null,
+    sourceId: Number.isInteger(sourceId) ? sourceId : null,
     name,
     actions,
     dedupe: normalizeScanDedupe(raw.dedupe),
@@ -175,11 +188,18 @@ export function normalizeScanModes(raw: unknown): ScanMode[] {
   return out
 }
 
+/** 指定データセットに紐づくモードだけを選ぶ(/scan のモードチップはソース単位)。 */
+export function modesForSource(modes: ScanMode[], sourceId: number | null): ScanMode[] {
+  if (sourceId === null) return modes
+  return modes.filter((m) => m.sourceId === sourceId || m.sourceId === null)
+}
+
 /** DB 行(public.scan_modes の snake_case)→ ScanMode。row の値は unknown なのでここで型を確定する。 */
 export function scanModeFromDb(row: Record<string, unknown> | null | undefined): ScanMode | null {
   if (!row) return null
   return normalizeScanMode({
     id: typeof row.id === 'number' ? row.id : null,
+    sourceId: typeof row.source_id === 'number' ? row.source_id : null,
     name: typeof row.name === 'string' ? row.name : '',
     actions: Array.isArray(row.actions) ? (row.actions as ScanAction[]) : [],
     dedupe: normalizeScanDedupe(row.dedupe),
@@ -192,9 +212,23 @@ export function scanModeFromDb(row: Record<string, unknown> | null | undefined):
 }
 
 /** ScanMode → DB の upsert payload(id なし = 新規。singleton 行ではないので行単位)。 */
-export function scanModeToDb(mode: ScanMode): Record<string, unknown> {
-  const db: Record<string, unknown> = {
+/** DB に書く1モードの行(snake_case)。scan_modes の Insert/Update の形と一致させる(database.types.ts)。 */
+export interface ScanModeDbRow {
+  id?: number
+  source_id: number | null
+  name: string
+  actions: { column: string; column_at: string; literal: string; payload_key: string; payload_at_key: string }[]
+  dedupe: string
+  confirm_before_record: boolean
+  require_found: boolean
+  enabled: boolean
+  updated_at: string
+}
+
+export function scanModeToDb(mode: ScanMode): ScanModeDbRow {
+  const db: ScanModeDbRow = {
     name: mode.name,
+    source_id: mode.sourceId,
     actions: mode.actions.map((a) => ({
       column: a.column,
       column_at: a.columnAt,
@@ -212,10 +246,15 @@ export function scanModeToDb(mode: ScanMode): Record<string, unknown> {
   return db
 }
 
-/** 既定のプリセット2つ(migrations/0006 の insert と同じ。片方を変えたらもう片方も直す)。 */
+/**
+ * 既定のプリセット2つ(migrations/0006 の insert と同じ。片方を変えたらもう片方も直す)。
+ * sourceId は null で置く(DB の行は migrations/0007 で最初のデータセットに紐づく。
+ * DB 行が無いときに画面が既定を表示する経路では、ソースを選んでから保存する)。
+ */
 export const DEFAULT_SCAN_MODES: ScanMode[] = [
   {
     id: null,
+    sourceId: null,
     name: 'チケット配布',
     actions: [{ column: '配布済', columnAt: '配布日時', literal: SCAN_FLAG_VALUE, payloadKey: '配布済', payloadAtKey: '配布日時' }],
     dedupe: 'warn',
@@ -227,6 +266,7 @@ export const DEFAULT_SCAN_MODES: ScanMode[] = [
   },
   {
     id: null,
+    sourceId: null,
     name: 'チェックイン',
     actions: [{ column: '来場済', columnAt: '来場日時', literal: SCAN_FLAG_VALUE, payloadKey: '来場済', payloadAtKey: '来場日時' }],
     dedupe: 'warn',
@@ -330,8 +370,8 @@ export interface ScanFlushResponse {
   results: ScanRecordEntry[]
   /** 実際にシートへ書き込んだ件数 */
   wrote: number
-  /** items payload の更新が成功したか(false のときシートは更新済み = 次の同期で一致する) */
-  dbUpdated: boolean
+  /** 証跡 scan_events の insert が成功したか(false でもシート書き込みは完了している。監査の欠落だけを注記で出す) */
+  auditWritten: boolean
 }
 
 /** /api/scan-columns の応答(シートに記録列を作る)。 */
@@ -341,7 +381,7 @@ export interface ScanColumnsResponse {
   /** 既にヘッダーにあった列(作らない) */
   existing: string[]
   headers: string[]
-  /** sync_settings.include_columns に追記したか(次回同期で payload が消えないようにする) */
+  /** sync_sources.include_columns に追記したか(次回取り込みで payload が消えないようにする) */
   includeColumnsUpdated: boolean
   includeColumns: string[]
 }

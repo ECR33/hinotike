@@ -9,34 +9,44 @@
 // - 照会: 検出1回で /result へ遷移(QrScanner の既定の1回停止)
 // - 記録(連続): 検出しても止めない。scan-check で即時フィードバック → 確定(/api/scan-flush)でシートへ書く
 // - 記録(確認): 検出すると pending card(氏名・現在の状態)を出し、ボタンで記録/上書き/見送り
-// - 「新しい記録を作る」でモードとシート列をその場で作れる(動的増減)
+// - 「新しい記録を作る」でモードとシート列をその場で作れる(動的増減)。モードは**1データセットに紐づく**
+//
+// データセット(doc/docs/datasets.md): 作業前に「どの Spreadsheet のデータで作業するか」を決める。
+// - /sync に複数の定義(public.sync_sources)を保持する。この画面の「データの取り込み」で
+//   選んだ1データを端末(IndexedDB)に置き、以後の照会・一覧・記録は端末内のミラーに対して走る。
+// - 記録の確定はサーバーが**その時点のシート値**を読んでから書く(他の端末の書き込みを吸収する)。
+//   端末のミラーには応答の written を写す(シートが唯一の正)。
 //
 // 画面の並びは「スキャン運用の頻度」で決める(カメラを上に寄せる):
 // - カメラ(h1 の直下)= スマホのレンズは本体上部にあるため、プレビューが画面中央だと
 //   向けるべき位置とズレて QR を探しにくい。枠内右上にスキャン範囲・ライトのトグルを置く
 //   (app/components/QrScanner.vue)。
 // - カメラ直下: 停止/開始 → モード選択(その場で切り替える運用なのでタップ圏に残す)。
-// - 管理欄(1行サマリの details): オフラインモードの準備/解除/削除、モードの無効化・削除、
+// - 管理欄(1行サマリ の details): データの取り込み/解除/削除、モードの無効化・削除、
 //   新しい記録の作成、記録の設定への導線。通信の良い場所でやる管理操作なのでカメラから離す
 //   (底面バーの「管理」dropdown と同じ役割の欄。閉じた高さは1行ぶんに抑える)。
-// - 例外: 運用中に確認すべきもの(確認カード・オフラインの待機記録の banner・エラー・注記)は
+// - 例外: 運用中に確認すべきもの(確認カード・端末にためた記録の banner・エラー・注記)は
 //   折りたたみ外に出す。確認カードはさらに **カメラ枠の内側下部**(QrScanner の overlay slot)に
 //   被せる — 枠の下に積むと小さい画面で「記録/見送り」が bottom-nav に隠れてスクロールが必要。
+import { describeApiError } from '#shared/utils/apiError'
 import type { ScanCheckResponse, ScanConfigResponse, ScanDedupe, ScanFlushResponse, ScanMode, ScanRecordEntry } from '#shared/utils/scan'
+import { modesForSource, modeColumnsMissing, scanModeSummary, scanStatusMessage, SCAN_AUTO_FLUSH_COUNT, SCAN_FLAG_VALUE, formatJst } from '#shared/utils/scan'
+import type { ImportPageResponse, SyncSource } from '#shared/utils/sync'
+import type { MeState } from '#shared/utils/auth'
 import { readBeepMutedFromStorage, writeBeepMutedToStorage } from '~/utils/scanBeep'
-import { formatJst, modeColumnsMissing, scanModeSummary, scanStatusMessage, SCAN_AUTO_FLUSH_COUNT, SCAN_FLAG_VALUE } from '#shared/utils/scan'
 import type { OfflineItemRow } from '~/utils/offlineStore'
+import { offlineClearQueue, purgeDeviceData } from '~/utils/offlineStore'
 import type { OfflineFlushResponse, OfflineMeta, OfflineQueueEntry } from '#shared/utils/offline'
-import { makeOfflineQueueId, offlineScanCheckResponse, OFFLINE_FLUSH_CHUNK, OFFLINE_ITEM_MAX, OFFLINE_PAGE_BATCH, OFFLINE_QUEUE_MAX } from '#shared/utils/offline'
+import { makeOfflineQueueId, mirrorBelongsToUser, offlineScanCheckResponse, OFFLINE_FLUSH_CHUNK, OFFLINE_ITEM_MAX, OFFLINE_PAGE_BATCH, OFFLINE_QUEUE_MAX } from '#shared/utils/offline'
 import { parseRegistrationCode } from '#shared/utils/registration'
 
 /**
- * オフラインモード(地下など電波状況の悪い場所でのスキャン・照会・チェックイン):
- * - 「オフラインモード準備」で items 全件 + scan-config を IndexedDB にダウンロードし、
- *   localStorage に有効化フラグを置く(SSR は storage を読めないので初回描画は「無効」。onMounted で有効化する)。
- * - オフライン中の記録は /api/scan-check を叩かずローカル payload で照合し、読み取りを IndexedDB の
- *   キューにためる(画面を閉じても残る)。シートへの書き込みは復旧後の「オフラインの記録を確定」で行う。
- * - オフライン中の照会(照会モード)は /result へ SPA 遷移し、/result がローカルスナップショットで照会する
+ * ローカルデータセットでの作業(地下など電波状況の悪い場所でも使える):
+ * - 「データの取り込み」で選んだデータセットのシートを `/api/import` の分页で読み、IndexedDB に保存し、
+ *   localStorage に「作業中のデータセット」のメタを置く(SSR は storage を読めないので初回描画は「無効」。onMounted で有効化する)。
+ * - ローカル中の記録は /api/scan-check を叩かずローカル payload で照合し、読み取りを IndexedDB の
+ *   キューにためる(画面を閉じても残る)。シートへの書き込みは任意のタイミングの「記録を確定」で行う。
+ * - ローカル中の照会(照会モード)は /result へ SPA 遷移し、/result がローカルミラーで照会する
  *   (SW が precache した JS チャンクで開くため HTML のネットワークは不要)。
  */
 
@@ -59,9 +69,45 @@ if (configState.value === null) {
   }).catch(() => null)
 }
 
+// ローカルデータセットの状態(useOfflineState は onMounted で localStorage のメタ + IndexedDB のキュー件数を引き当てる。
+// top-level に分解するので template の自動 unwrap が効く)。SSR は storage を読めない = 初回は「未取り込み」。
+// localWork は「有効フラグ + uid 一致」(この端末のデータを**取り込んだ利用者**だけ使える)。
+const {
+  meta: offlineMeta,
+  queueCount: offlineQueueCount,
+  localWork,
+  uidMismatch,
+  refreshQueueCount,
+} = useOfflineState()
+/** 認証状態(SSR が埋め込む)。ミラーの uid と比較して別ユーザのローカル作業を無効にする。 */
+const authState = useState<MeState | null>('auth-state', () => null)
+
+/**
+ * **作業中のデータセット**(どの Spreadsheet のデータで作業するか)。
+ * - 取り込み済みならその id(meta.sourceId)。未取り込みは有効な最初のソース(onMounted で選ぶ)。
+ * - モード選択・記録の書き込み先・ローカル照合はすべてこの id に追随する。
+ * - 切替は selectSource(id): そのデータが端末にあればミラーを引き直し、無ければ通信を読んで再取り込みする。
+ */
+const activeSourceId = useState<number | null>('scan-source-id', () => null)
+const sources = computed<SyncSource[]>(() => configState.value?.sources ?? [])
+const enabledSources = computed<SyncSource[]>(() => sources.value.filter((s) => s.enabled))
+const activeSource = computed<SyncSource | null>(
+  () => sources.value.find((s) => s.id === activeSourceId.value) ?? null,
+)
+/** 取り込み済みのデータセットで作業しているか(= ローカルミラーが作業中のソースと**その利用者**に一致する)。 */
+const workingLocally = computed(
+  () => localWork.value && offlineMeta.value?.sourceId === activeSourceId.value,
+)
+
 // 選択したモード(null = 照会。スキャン→結果→スキャンの往復でも選択を維持する)。
 const selectedModeId = useState<number | null>('scan-mode-id', () => null)
-const modes = computed<ScanMode[]>(() => configState.value?.modes ?? [])
+/** モードはデータセットに紐づく(scan_modes.source_id)ので、作業中のソースのモードだけ選ぶ。 */
+const modes = computed<ScanMode[]>(() => modesForSource(configState.value?.modes ?? [], activeSourceId.value))
+/**
+ * **全データセットのモード**(保存の送信用)。scan-config の POST は「送られたリストが正」なので、
+ * 作業中のソースのモードだけ送ると他のソースのモードが消える。表示は modes(ソースで絞る)、送信は allModes。
+ */
+const allModes = computed<ScanMode[]>(() => configState.value?.modes ?? [])
 const activeMode = computed<ScanMode | null>(() => {
   if (selectedModeId.value === null) return null
   return modes.value.find((m) => m.id === selectedModeId.value) ?? null
@@ -113,16 +159,72 @@ const offlineNote = ref<string | null>(null)
 // 復旧確定(/api/scan-offline-flush)の失敗用。セッション欄の errorMessage と分ける(照会モードでもBannerに出せるようにする)
 const queueError = ref<string | null>(null)
 
-// オフラインモードの状態(useOfflineState は onMounted で localStorage のメタ + IndexedDB のキュー件数を引き当てる。
-// top-level に分解するので template の自動 unwrap が効く)。
-const { meta: offlineMeta, queueCount: offlineQueueCount, enabled: offlineEnabled, refreshQueueCount } = useOfflineState()
-// スナップショット有効時は SSR 缓存の旧設定より準備時のスナップショットを優先する(モードチップと欠け列注記の根)。
-onMounted(() => {
-  if (offlineMeta.value?.enabled) configState.value = offlineMeta.value.config
+// 作業中のデータセットの初期化(SSR は storage を読めない)。取り込み済みならそのソース+設定を引き当てる。
+// 未取り込みは有効な最初のソースを選ぶ(オンライン運用でも「どちらのデータの作業か」を明示する)。
+// **uid 一致**のミラーだけ復元する(別利用者が取り込んだミラーは設定の根にしない = 氏名を読ませない)。
+// auth-state の uid が後から解決される(缓存 HTML を開いた等)場合は watch でやり直す。
+function restoreMirrorState(): void {
+  const m = readOfflineMetaFromStorage()
+  if (m?.enabled && mirrorBelongsToUser(m, authState.value?.uid)) {
+    // ミラーの有効時は SSR 缓存の旧設定より取り込み時のスナップショットを優先する(モードチップと欠け列注記の根)
+    configState.value = m.config
+    activeSourceId.value = m.sourceId
+    writeActiveSourceToStorage(m.sourceId)
+  } else {
+    // 未取り込み・別利用者のミラー: 「この端末がどのデータの作業をしているか」の選択(破損・未設定は有効な最初のソース)
+    activeSourceId.value = readActiveSourceFromStorage() ?? enabledSources.value[0]?.id ?? null
+  }
+  // 作業中のソースのシート実測(ヘッダー)が缓存に無いときは引き直す(欠け列注記・列作成の根)。
+  if (activeSourceId.value !== null && !workingLocally.value) void refreshConfigForSource(activeSourceId.value)
+}
+
+onMounted(() => restoreMirrorState())
+watch(localWork, (ok) => {
+  if (ok) restoreMirrorState()
 })
-/** 読み取りごとに localStorage を sync で読む(判定を onMounted 状態に依存しないため)。SSR では null = 無効。 */
+
+/** 作業中のデータセットの設定(モード + 対象シートのヘッダー)をサーバーから引き直す。 */
+async function refreshConfigForSource(sourceId: number): Promise<void> {
+  try {
+    const cfg = await $fetch<ScanConfigResponse>('/api/scan-config', {
+      query: { sourceId },
+      headers: useRequestHeaders(['cookie']),
+    })
+    configState.value = cfg
+  } catch (e: unknown) {
+    errorMessage.value = describeError(e)
+  }
+}
+
+/**
+ * 作業するデータセットを選ぶ。取り込み済みのソースならミラーの設定を引き直し、
+ * 未取り込みのソースはサーバーから設定(モード一覧 + シートヘッダー)を読む(取り込みは別ボタン)。
+ * モードはソースに紐づくので選択はリセットする(別シートのモード id を引き継がない)。
+ */
+async function selectSource(source: SyncSource | null): Promise<void> {
+  if (!source || source.id === null) return
+  activeSourceId.value = source.id
+  writeActiveSourceToStorage(source.id) // ページ間(/items・/result)で同じデータの作業を続ける
+  selectedModeId.value = null
+  pending.value = null
+  flushNote.value = null
+  session.value = []
+  if (localWork.value && offlineMeta.value?.sourceId === source.id) {
+    configState.value = offlineMeta.value.config
+  } else {
+    await refreshConfigForSource(source.id)
+  }
+  remountScanner()
+  offlineNote.value = `作業中のデータセット: "${source.name}"${workingLocally.value ? '(この端末に取り込み済み)' : '(未取り込み — 通信を読んで照会・記録します)'}。記録は "${source.name}" のシートへ書き込まれます。`
+}
+
+/**
+ * 読み取りごとに localStorage を sync で読む(判定を onMounted 状態に依存しないため)。SSR では null = 無効。
+ * **uid 一致**も条件(別利用者のミラーでローカル照合・ローカル記録しない = 通信の API 照会に戻る)。
+ */
 function offlineActive(): boolean {
-  return readOfflineMetaFromStorage()?.enabled === true
+  const m = readOfflineMetaFromStorage()
+  return m?.enabled === true && mirrorBelongsToUser(m, authState.value?.uid) && m.sourceId === activeSourceId.value
 }
 
 function selectMode(mode: ScanMode | null) {
@@ -157,21 +259,26 @@ async function onDetected(code: string) {
   busy.value = true
   errorMessage.value = null
   try {
-    // オフラインモード: /api/scan-check を叩かずローカルスナップショット(payload)で照合する。
-    // シート行の存在(sheet_missing)はオフラインでは判定できない(payload を鏡として扱う)。復旧後の flush で確定する。
+    // ローカル作業: /api/scan-check を叩かず端末内のミラー(payload)で照合する。
+    // シート行の存在(sheet_missing)はローカルでは判定できない(payload を鏡として扱う)。確定時のサーバーで判定する。
     if (offlineActive()) {
       if (mode.id === null) {
-        errorMessage.value = 'オフラインではまだ保存されていないモードを記録できません(先に「記録の設定」で保存してください)'
+        errorMessage.value = 'ローカル作業ではまだ保存されていないモードを記録できません(先に「記録の設定」で保存してください)'
         return
       }
       if (parseRegistrationCode(code)) {
         errorMessage.value = '利用者登録用のQRです(記録対象のチケットコードをスキャンしてください)'
         return
       }
-      const row = await offlineGetItem(code).catch(() => undefined)
+      const sourceId = offlineMeta.value?.sourceId ?? activeSourceId.value
+      if (sourceId == null) {
+        errorMessage.value = '作業中のデータセットが決まっていません(「データの取り込み」でデータセットを選んでください)'
+        return
+      }
+      const row = await offlineGetItem(sourceId, code).catch(() => undefined)
       const checked = offlineScanCheckResponse(mode.id, mode, code, row?.payload ?? null, new Date().toISOString())
       if (mode.confirmBeforeRecord) {
-        // 確認モード(チェックイン): オフラインでも氏名と現在の状態を出してから確定する(安全弁はオンラインと同じ)
+        // 確認モード(チェックイン): ローカルでも氏名と現在の状態を出してから確定する(安全弁はオンラインと同じ)
         pending.value = checked
         return
       }
@@ -190,10 +297,11 @@ async function onDetected(code: string) {
       })
       if (queued) {
         if (offlineQueueCount.value >= OFFLINE_QUEUE_MAX) {
-          errorMessage.value = `オフラインの待機記録が上限(${OFFLINE_QUEUE_MAX}件)に達しました。通信が復旧したら確定してください`
+          errorMessage.value = `端末にためた記録が上限(${OFFLINE_QUEUE_MAX}件)に達しました。通信が戻ったら確定してください`
         } else {
           await offlineAddQueueEntry({
             id: makeOfflineQueueId(mode.id, checked.code, checked.at),
+            sourceId,
             modeId: mode.id,
             modeName: mode.name,
             code: checked.code,
@@ -203,9 +311,9 @@ async function onDetected(code: string) {
             at: checked.at,
           })
           await refreshQueueCount()
-          // オンラインの自動flush閾値は通信するが、オフライン中は通信しない(ローカル蓄積の注記だけ出す)
+          // オンラインの自動flush閾値は通信するが、ローカル中は通信しない(ローカル蓄積の注記だけ出す)
           if (session.value.filter((e) => e.offlineQueued).length >= SCAN_AUTO_FLUSH_COUNT) {
-            offlineNote.value = 'オフライン中: 読み取りをローカルにためています(通信が復旧したら「オフラインの記録を確定」でまとめてシートへ書き込みます)'
+            offlineNote.value = 'ローカル作業中: 読み取りを端末にためています(通信が戻ったら「記録を確定」でシートへ書き込みます)'
           }
         }
       }
@@ -239,22 +347,20 @@ async function onDetected(code: string) {
   }
 }
 
+/**
+ * API の失敗を画面向けの案内にする(shared/utils/apiError の理由コード → 文言)。
+ * 日本語の statusMessage は h3 が status line から ASCII に落とすため、以前は
+ * `400 "" ()` のような欠けた文言が出ていた。理由は `data.reason` か body の `message` で復元する。
+ */
 function describeError(e: unknown): string {
-  const err = e as { statusCode?: number; statusMessage?: string; data?: { columns?: string[] } }
-  if (err?.statusCode === 401) return 'ログインが必要です'
-  if (err?.statusCode === 403) return 'この操作は users テーブルに紐付け済みのユーザのみ実行できます'
-  if (err?.statusMessage === 'column_missing' || (err?.statusMessage?.includes('ヘッダーにありません') ?? false)) {
-    return err.statusMessage ?? '記録カラムがシートにありません'
-  }
-  if (err?.statusMessage) return err.statusMessage
-  return '失敗しました。もう一度お試しください'
+  return describeApiError(e).friendly
 }
 
-/** 未確定の読み取りをまとめてシートへ書く(/api/scan-flush)。 */
+/** 未確定の読み取りをまとめてシートへ書く(/api/scan-flush)。書き込み先は作業中のデータセットのシート。 */
 async function flush() {
-  // オフライン中は通信しない(ローカルキューにためて、復旧後に「オフラインの記録を確定」で書く)
+  // ローカル作業中は通信しない(端末にためて、任意のタイミングの「記録を確定」で書く)
   if (offlineActive()) {
-    offlineNote.value = 'オフライン中はシートに書き込みません(通信が復旧したら「オフラインの記録を確定」でまとめて書き込みます)'
+    offlineNote.value = 'ローカル作業中はシートに書き込みません(通信が戻ったら「端末にためた記録を確定」で書き込みます)'
     return
   }
   const mode = activeMode.value
@@ -282,7 +388,15 @@ async function flush() {
       entry.queued = false
       entry.overwrite = false
     }
-    flushNote.value = `${res.wrote}件をシートに書き込みました(${res.sheetTitle})${res.dbUpdated ? '' : ' ※items の更新に失敗したぶんがあります(シートは保存済み。次の同期で一致します)'}`
+    // 端末ミラー(this data set の IndexedDB)に書き込んだ値を反映する(シートが正。一覧・照会が即追随する)
+    const mirror = activeSourceId.value
+    if (mirror !== null) {
+      for (const r of res.results) {
+        if (r.status !== 'ok' && r.status !== 'duplicate') continue
+        await offlineMergePayload(mirror, r.code, r.written).catch(() => {})
+      }
+    }
+    flushNote.value = `${res.wrote}件をシートに書き込みました(${res.sheetTitle})${res.auditWritten ? '' : ' ※記録履歴の保存に失敗したぶんがあります(シートは保存済み)'}`
   } catch (e: unknown) {
     errorMessage.value = describeError(e)
   } finally {
@@ -311,19 +425,21 @@ function confirmRecord(overwrite: boolean) {
   pending.value = null
   remountScanner()
   if (offlineMode) {
-    if (mode?.id != null) {
+    const sourceId = offlineMeta.value?.sourceId ?? activeSourceId.value
+    if (mode?.id != null && sourceId != null) {
       void offlineAddQueueEntry({
         id: makeOfflineQueueId(mode.id, p.code, p.at),
+        sourceId,
         modeId: mode.id,
         modeName: mode.name,
         code: p.code,
-        status: 'ok', // 復旧後の flush 側で現在の状態から ok/duplicate/skipped を再確定する
+        status: 'ok', // 確定時のサーバーが現在のシート値から ok/duplicate/skipped を再確定する
         name: p.name,
         overwrite,
         at: p.at,
       }).then(() => refreshQueueCount())
     }
-    offlineNote.value = 'オフライン: 氏名を確認してローカルに記録しました(通信が復旧したら「オフラインの記録を確定」でシートへ書き込みます)'
+    offlineNote.value = 'ローカル作業: 氏名を確認して端末に記録しました(通信が戻ったら「端末にためた記録を確定」でシートへ書き込みます)'
     return
   }
   // 確認モードは「確認ボタンで1件を確定する」運用なので、その場で flush する
@@ -338,35 +454,68 @@ function dismissPending() {
   remountScanner()
 }
 
-// ── オフラインモードの準備・解除・復旧確定 ──────────────
+// ── データの取り込み・ローカル作業の解除・ためた記録の確定 ──────
 
 const prepBusy = ref(false)
 const prepProgress = ref('')
 const prepError = ref<string | null>(null)
 
 /**
- * オフラインモード準備: scan-config + items-list の分页を最後まで読み、IndexedDB に保存して
- * localStorage のフラグを ON にする。SW の NetworkFirst にもページ(/ と /scan)の HTML をためる
- * (fetch は SW がinterceptするので、準備時に1回読むだけでオフライン起動できる)。
+ * ミラーのメタに写す **uid**(取り込んだ利用者)。auth-state が未解決なら `/api/me` で引く
+ * (通信が無い・解決できないときは null = 取り込みしない。uid 無いメタは別ユーザが読めるので置かない)。
  */
-async function prepareOffline() {
+async function currentUid(): Promise<string | null> {
+  const known = authState.value?.uid
+  if (known) return known
+  try {
+    const me = await $fetch<MeState>('/api/me')
+    authState.value = me
+    return me.uid
+  } catch {
+    return null
+  }
+}
+
+/**
+ * **データの取り込み**: 指定データセットのシートを `/api/import` の分页で読み、IndexedDB のミラーを
+ * そのデータセットで置き換えて、localStorage のメタを ON にする(= 以後の照会・一覧・記録は端末内のデータに対して走る)。
+ * ミラーは**1データセットだけ**(別のデータセットを取り込むと前の行は消える = 「今どちらの作業か」は1つ)。
+ * SW の NetworkFirst にもページ(/ と /scan・/items)の HTML をためる(通信が無い時の起動用)。
+ */
+async function importDataset(source: SyncSource | null): Promise<void> {
   if (prepBusy.value) return
+  if (!source || source.id === null) {
+    prepError.value = '取り込みするデータセットを選んでください(/sync で定義を追加できます)'
+    return
+  }
+  const sourceId = source.id
+  const uid = await currentUid()
+  if (!uid) {
+    prepError.value = 'ログイン情報が解決できないため取り込みできません(再ログインしてから通信の良い場所で実行してください)'
+    return
+  }
   prepBusy.value = true
   prepError.value = null
   offlineNote.value = null
-  prepProgress.value = '設定を読み込み中…'
+  prepProgress.value = 'シートを読み込み中…'
   try {
-    const cfg = await $fetch<ScanConfigResponse>('/api/scan-config')
+    // 取り込み時の設定(モード一覧 + 対象シートのヘッダー)をこのソースで引き直す
+    const cfg = await $fetch<ScanConfigResponse>('/api/scan-config', {
+      query: { sourceId },
+      headers: useRequestHeaders(['cookie']),
+    })
     configState.value = cfg
     const rows: OfflineItemRow[] = []
     let cursor = ''
     let capped = false
+    let sheetTitle = ''
     for (;;) {
-      const page = await $fetch<{ rows: OfflineItemRow[]; nextCursor: string | null; total: number }>('/api/items-list', {
-        query: { limit: OFFLINE_PAGE_BATCH, ...(cursor ? { cursor } : {}) },
+      const page = await $fetch<ImportPageResponse>('/api/import', {
+        query: { sourceId, limit: OFFLINE_PAGE_BATCH, ...(cursor ? { cursor } : {}) },
       })
-      rows.push(...page.rows)
-      prepProgress.value = `${rows.length}/${page.total ?? rows.length}件 をダウンロード中…`
+      sheetTitle = page.sheetTitle
+      rows.push(...page.rows.map((r) => ({ code: r.code, payload: r.payload, sourceId })))
+      prepProgress.value = `${rows.length}/${page.total ?? rows.length}件 を取り込み中…`
       if (!page.nextCursor) break
       if (rows.length >= OFFLINE_ITEM_MAX) {
         capped = true
@@ -376,6 +525,10 @@ async function prepareOffline() {
     }
     const meta: OfflineMeta = {
       enabled: true,
+      sourceId,
+      uid,
+      sourceName: source.name,
+      source,
       snapshotAt: new Date().toISOString(),
       itemCount: rows.length,
       config: cfg,
@@ -384,12 +537,14 @@ async function prepareOffline() {
     await offlineSaveSnapshot(meta, rows)
     writeOfflineMetaToStorage(meta)
     offlineMeta.value = meta
+    activeSourceId.value = sourceId
+    selectedModeId.value = null
     await refreshQueueCount()
-    // オフライン起動用のページキャッシュをためる(SW が NetworkFirst で缓存。dev では SW が無いので素通し)
+    // ローカル作業起動用のページキャッシュをためる(SW が NetworkFirst で缓存。dev では SW が無いので素通し)
     await fetch('/scan').catch(() => {})
     await fetch('/').catch(() => {})
     await fetch('/items').catch(() => {})
-    offlineNote.value = `オフライン準備完了(${rows.length}件${capped ? `、上限 ${OFFLINE_ITEM_MAX}件で打ち切り` : ''}・設定 ${cfg.modes.length}モード)。地下でもスキャン・照会・チェックイン・items一覧が使えます。`
+    offlineNote.value = `取り込み完了: "${source.name}"(${sheetTitle}) ${rows.length}件${capped ? `、上限 ${OFFLINE_ITEM_MAX}件で打ち切り` : ''}・モード ${cfg.modes.length}個。通信がなくてもスキャン・照会・チェックイン・items一覧が使えます。`
   } catch (e: unknown) {
     prepError.value = describeError(e)
   } finally {
@@ -398,7 +553,7 @@ async function prepareOffline() {
   }
 }
 
-/** オフライン解除: フラグだけ OFF(スナップショットとキューは残る。再準備で更新できる)。 */
+/** ローカル作業の解除: フラグだけ OFF(ミラーとためた記録は残る。再取り込みで更新できる)。 */
 function disableOffline() {
   const m = offlineMeta.value
   if (!m) return
@@ -407,26 +562,51 @@ function disableOffline() {
   offlineMeta.value = next
 }
 
-/** スナップショット削除(items + meta)。オフラインの待機記録は復旧確定できるので残す。 */
+/**
+ * **この端末のデータを完全に削除**: ミラー(items+meta)・localStorage のメタとデータセット選択・
+ * SW のページキャッシュ(氏名・email が載った缓存 HTML)を捨てる。ためた記録は捨てず、
+ * **氏名だけ除去**して code / modeId / at を残す(通信が戻れば確定できる)。
+ */
 async function deleteOfflineData() {
   try {
-    await offlineDeleteSnapshot()
+    const { strippedNames, queueKept } = await purgeDeviceData()
+    offlineMeta.value = null
+    offlineQueueCount.value = queueKept
+    discardArmed.value = false
+    offlineNote.value =
+      `この端末のデータを削除しました(取り込みデータとページキャッシュを消しました)${
+        strippedNames > 0 ? ` / ためた記録 ${strippedNames}件の氏名を除去しました` : ''
+      }${queueKept > 0 ? ` / ためた記録 ${queueKept}件は code として残ります(確定できます)` : ''}`
   } catch (e: unknown) {
     prepError.value = describeError(e)
+  }
+}
+
+/** ためた記録の待機をすべて捨てる(未確定の記録はシートに書かれないまま消える)。2段階確認で実行する。 */
+const discardArmed = ref(false)
+async function discardQueue() {
+  if (!discardArmed.value) {
+    discardArmed.value = true
+    queueError.value = `ためた記録 ${offlineQueueCount.value}件を捨てます(シートには書き込まれません)。もう一度「すべて捨てる」で実行`
     return
   }
-  clearOfflineMetaStorage()
-  offlineMeta.value = null
-  await refreshQueueCount()
-  offlineNote.value = `スナップショットを削除しました${offlineQueueCount.value > 0 ? `(オフラインの待機記録 ${offlineQueueCount.value}件は残ります)` : ''}`
+  const dropped = offlineQueueCount.value
+  try {
+    await offlineClearQueue()
+    await refreshQueueCount()
+    discardArmed.value = false
+    queueError.value = null
+    offlineNote.value = `ためた記録 ${dropped}件を捨てました(シートに書き込みませんでした)`
+  } catch (e: unknown) {
+    queueError.value = describeError(e)
+  }
 }
 
 /**
- * 復旧確定: ローカルキューを modeId でグループ化し、1モードごとに chunk(≤ OFFLINE_FLUSH_CHUNK)で
- * /api/scan-offline-flush に送る。シートの日時と証跡にはオフライン時の読み取り時刻(at)がそのまま載る。
- * write_failed はキューに残す(もう一度確定できる)。
- * オフラインモードの ON/OFF とは独立(接続が戻っていれば書ける。戻らなければ $fetch が失敗し
- * キューはそのまま残る — 「失敗 N件は再確定できます」の注記が出る)。
+ * ためた記録の確定: キューを modeId でグループ化し、1モードごとに chunk(≤ OFFLINE_FLUSH_CHUNK)で
+ * `/api/scan-offline-flush` に送る。サーバーはその時点のシートを読み直して行位置と現在の状態を確定し、
+ * シートの日時・証跡には端末での読み取り時刻(at)がそのまま載る。write_failed はキューに残す(もう一度確定できる)。
+ * ローカル作業の ON/OFF とは独立(接続が戻っていれば書ける。戻らなければ $fetch が失敗しキューはそのまま残る)。
  */
 async function flushOfflineQueue() {
   if (busy.value) return
@@ -468,6 +648,10 @@ async function flushOfflineQueue() {
           doneIds.push(e.id)
           if (r.status === 'ok' || r.status === 'duplicate') wrote += 1
           else skipped += 1
+          // 端末ミラーに書き込んだ値を反映する(シートが正。取り込み済みのデータなら一覧・照会が即追随する)
+          if (r.written && Object.keys(r.written).length > 0) {
+            await offlineMergePayload(e.sourceId, e.code, r.written).catch(() => {})
+          }
           // セッション欄の該当行を確定結果に書き換える(オンライン flush と同じ扱い)
           for (const s of session.value) {
             if (s.offlineQueued && s.code === e.code && s.at === e.at) {
@@ -485,9 +669,10 @@ async function flushOfflineQueue() {
     }
     await offlineRemoveQueueEntries(doneIds)
     await refreshQueueCount()
-    // 成功注記は offlineNote(オフラインモード欄に出す)。Banner はキュー 0 だと消えるので注記置き場にしない
+    discardArmed.value = false
+    // 成功注記は offlineNote(データセット欄に出す)。Banner はキュー 0 だと消えるので注記置き場にしない
     offlineNote.value =
-      `復旧確定: ${wrote}件をシートに書き込みました${skipped > 0 ? ` / 既に済だった ${skipped}件は書き込みませんでした` : ''}${failed > 0 ? ` / 失敗 ${failed}件は再確定できます` : ''}${offlineQueueCount.value > 0 ? ` / ローカル残り ${offlineQueueCount.value}件` : ''}`
+      `確定: ${wrote}件をシートに書き込みました${skipped > 0 ? ` / 既に済だった ${skipped}件は書き込みませんでした` : ''}${failed > 0 ? ` / 失敗 ${failed}件は再確定できます` : ''}${offlineQueueCount.value > 0 ? ` / 端末に残り ${offlineQueueCount.value}件` : ''}`
   } catch (e: unknown) {
     queueError.value = describeError(e)
   } finally {
@@ -522,18 +707,20 @@ async function createMode() {
   createError.value = null
   createNote.value = null
   try {
-    // 1) シート列を作る(列が既にあれば existing で返る。取り込みカラムへの追記も選ぶ)
+    // 1) シート列を作る(作業中のデータセットのシート。列が既にあれば existing で返る。取り込みカラムへの追記も選ぶ)
     if (newAddColumns.value) {
       const columns = flag && at ? [flag, at] : [flag]
       const res = await $fetch<{ created: string[]; existing: string[]; includeColumnsUpdated: boolean }>('/api/scan-columns', {
         method: 'POST',
-        body: { columns, addToIncludeColumns: true },
+        body: { columns, sourceId: activeSourceId.value, addToIncludeColumns: true },
       })
       createNote.value = `シート列: 追加 ${res.created.join(', ') || 'なし'} / 既存 ${res.existing.join(', ') || 'なし'}${res.includeColumnsUpdated ? ' / 取り込みカラムに追加しました' : ''}`
     }
-    // 2) モードを保存(既存モードのリストに新モードを足して送る = リストが正)
+    // 2) モードを保存(**全データセットのモード**に新モードを足して送る = リストが正。
+    //    表示は作業中のソースのモードだけなので、ソース別のモードを消さないために全件を送る)
     const newMode: Partial<ScanMode> = {
       name,
+      sourceId: activeSourceId.value,
       actions: [{ column: flag, columnAt: at, literal: SCAN_FLAG_VALUE, payloadKey: flag, payloadAtKey: at }],
       dedupe: newDedupe.value,
       confirmBeforeRecord: newConfirm.value,
@@ -542,7 +729,7 @@ async function createMode() {
     }
     const res = await $fetch<ScanConfigResponse>('/api/scan-config', {
       method: 'POST',
-      body: { modes: [...(configState.value?.modes ?? []), newMode] },
+      body: { modes: [...allModes.value, newMode], sourceId: activeSourceId.value },
     })
     configState.value = res
     const created = res.modes.find((m) => m.name === name)
@@ -569,7 +756,7 @@ async function toggleActiveModeEnabled() {
   if (!mode || mode.id === null) return
   busy.value = true
   try {
-    const next = modes.value.map((m) => (m.id === mode.id ? { ...m, enabled: !m.enabled } : m))
+    const next = allModes.value.map((m) => (m.id === mode.id ? { ...m, enabled: !m.enabled } : m))
     const res = await $fetch<ScanConfigResponse>('/api/scan-config', { method: 'POST', body: { modes: next } })
     configState.value = res
     if (!res.modes.find((m) => m.id === mode.id)?.enabled) selectMode(null)
@@ -643,6 +830,28 @@ const activeMissingColumns = computed(() =>
       </QrScanner>
     </div>
 
+    <!-- データセット選択(どの Spreadsheet のデータで作業するか)。記録は選んだデータのシートへ書き込まれる。
+         取り込み済みのデータは端末内のミラーで照会・記録するので通信が要らない(chip に ✓端末 を出す) -->
+    <div class="mode-row chip-row" role="group" aria-label="作業するデータセット">
+      <button
+        v-for="source in enabledSources"
+        :key="source.id ?? source.name"
+        class="btn secondary"
+        :class="{ active: source.id === activeSourceId }"
+        @click="selectSource(source)"
+      >{{ source.name }}<span v-if="localWork && offlineMeta?.sourceId === source.id"> ✓端末</span></button>
+      <button class="btn secondary" :disabled="prepBusy || activeSource === null" @click="importDataset(activeSource)">
+        {{ prepBusy ? `取り込み中… ${prepProgress}` : 'このデータを端末に取り込む' }}
+      </button>
+    </div>
+    <p v-if="sources.length === 0" class="error">
+      データセットがありません。「データの設定」(/sync)でスプレッドシートを追加してください。
+    </p>
+    <p v-if="activeSource" class="muted">
+      作業中のデータ: {{ activeSource.name }} / シート {{ configState?.sheetTitle ?? '未読' }}
+      {{ workingLocally ? '(この端末に取り込み済み)' : '(未取り込み — 通信を読んで照会・記録します)' }}
+    </p>
+
     <!-- モード選択(照会 + 記録モード)。無効化されたモードは出さない。compact(chip-row)で高さを節約し、
          カメラのすぐ下のタップ圏に置く(「新しい記録を作る」「記録の設定」は管理欄へ移した) -->
     <div class="mode-row chip-row" role="group" aria-label="スキャンのモード">
@@ -668,15 +877,24 @@ const activeMissingColumns = computed(() =>
     <!-- 「何を記録するか」の要約はスキャン開始に不要なのでカメラの下に出す(確認カードは枠内) -->
     <p v-if="recording" class="muted">{{ activeSummary }}</p>
 
-    <!-- オフラインの待機記録(通信が復旧したらまとめてシートへ書き込む)。
-         未確定のデータへの注意なので管理欄(折りたたみ)の外に残す -->
+    <!-- 端末にためた記録(通信が戻ったらシートへ書き込む)。未確定のデータへの注意なので管理欄(折りたたみ)の外に残す -->
     <div v-if="offlineQueueCount > 0" class="card offline-card">
-      <p>オフラインの記録 {{ offlineQueueCount }}件(通信が復旧したらまとめてシートへ書き込みます)</p>
+      <p>この端末にためた記録 {{ offlineQueueCount }}件(通信が戻ったらシートへ書き込みます)</p>
       <div class="mode-row">
-        <!-- オフラインモードの ON/OFF とは独立: 接続が戻っていれば確定できる(戻っていなければ失敗し、キューは残る) -->
-        <button class="btn" :disabled="busy" @click="flushOfflineQueue">オフラインの記録を確定({{ offlineQueueCount }}件)</button>
+        <!-- ローカル作業の ON/OFF とは独立: 接続が戻っていれば確定できる(戻っていなければ失敗し、キューは残る) -->
+        <button class="btn" :disabled="busy" @click="flushOfflineQueue">ためた記録を確定({{ offlineQueueCount }}件)</button>
+        <!-- 捨てるは2段階確認(1回目で案内、2回目で実行)。未確定の記録はシートに書かれないまま消える -->
+        <button class="btn secondary danger" :disabled="busy" @click="discardQueue">
+          {{ discardArmed ? `本当に捨てる(${offlineQueueCount}件)` : 'ためた記録をすべて捨てる' }}
+        </button>
       </div>
       <p v-if="queueError" class="error">{{ queueError }}</p>
+    </div>
+
+    <!-- この端末のミラーは別利用者が取り込んだもの(氏名・備考を含む)。この画面では使わない旨を外に出す -->
+    <div v-if="uidMismatch" class="error card">
+      この端末のデータは別の利用者が取り込んだものです(氏名・備考を含むためここでは使いません)。
+      通信のある場所で自分のログインで取り込み直すか、管理欄の「端末のデータを完全に削除」で捨ててください。
     </div>
 
     <!-- 記録セッション(モードの無効化・削除は管理欄へ移した。ここは「書く」操作だけ) -->
@@ -702,27 +920,29 @@ const activeMissingColumns = computed(() =>
       </ul>
       <p v-if="session.length === 0" class="muted">まだ読み取りがありません。カメラでチケットのQRを次々とスキャンしてください。</p>
     </div>
-    <!-- 管理欄: 電波の良い場所・スキャンの合間にやる操作を1行サマリの折りたたみにまとめる
-         (オフラインモードの準備/解除/削除・このモードの無効化/削除・新しい記録を作る・記録の設定) -->
+    <!-- 管理欄: 通信の良い場所・スキャンの合間にやる操作を1行サマリの折りたたみにまとめる
+         (データの取り込み/解除/削除・このモードの無効化/削除・新しい記録を作る・記録の設定) -->
     <details class="card admin-card offline-card">
       <summary class="offline-summary">
-        管理 — オフラインモード: {{ offlineMeta?.enabled ? `有効(スナップショット ${formatJst(offlineMeta.snapshotAt)}・${offlineMeta.itemCount}件${offlineMeta.capped ? `、上限 ${OFFLINE_ITEM_MAX}件で打ち切り` : ''})` : '無効(電波の良い場所で準備)' }}
+        管理 — 端末内のデータ: {{ offlineMeta?.enabled ? (uidMismatch ? `別利用者のデータ(この画面では使用しません)` : `有効("${offlineMeta.sourceName}" 取り込み ${formatJst(offlineMeta.snapshotAt)}・${offlineMeta.itemCount}件${offlineMeta.capped ? `、上限 ${OFFLINE_ITEM_MAX}件で打ち切り` : ''})`) : '未取り込み(通信の良い場所で取り込む)' }}
       </summary>
 
-      <h2>オフラインモード</h2>
+      <h2>データの取り込み(この端末で作業する)</h2>
       <p v-if="offlineMeta?.enabled" class="offline-desc">
-        スキャン・照会・記録・items一覧は通信を使いません。記録は通信が復旧したら「オフラインの記録を確定」でまとめてシートへ書き込みます。
+        "{{ offlineMeta.sourceName }}" をこの端末に持っています。スキャン・照会・記録・items一覧は通信を使いません。記録は通信が戻ったら「ためた記録を確定」でそのシートへ書き込みます。
       </p>
       <p v-else class="offline-desc">
-        電波の良い場所で「オフラインモード準備」を押すと、一覧データと記録の設定をこの端末に保存します。地下などでもスキャン・照会・チェックインができ、記録は通信が復旧したらまとめてシートへ書き込みます。
+        通信の良い場所で「このデータを端末に取り込む」を押すと、作業中のデータセットのシートをこの端末に保存します。地下などでもスキャン・照会・チェックインができ、記録は通信が戻ったらシートへ書き込みます。
       </p>
       <div class="mode-row">
-        <button class="btn" :disabled="prepBusy" @click="prepareOffline">{{ prepBusy ? `準備中… ${prepProgress}` : 'オフラインモード準備' }}</button>
-        <button v-if="offlineMeta?.enabled" class="btn secondary" @click="disableOffline">オフライン解除</button>
-        <button v-if="offlineMeta?.enabled" class="btn secondary" @click="deleteOfflineData">スナップショット削除</button>
+        <button class="btn" :disabled="prepBusy || activeSource === null" @click="importDataset(activeSource)">{{ prepBusy ? `取り込み中… ${prepProgress}` : 'このデータを端末に取り込む' }}</button>
+        <button v-if="offlineMeta?.enabled" class="btn secondary" @click="disableOffline">ローカル作業を解除</button>
+        <!-- ミラー + localStorage + ページキャッシュをまとめて捨てる(ためた記録は氏名だけ除去して残す) -->
+        <button v-if="offlineMeta?.enabled" class="btn secondary danger" @click="deleteOfflineData">端末のデータを完全に削除</button>
+        <NuxtLink class="btn secondary" to="/sync">データの設定</NuxtLink>
       </div>
       <p v-if="prepError" class="error">{{ prepError }}</p>
-      <!-- 注記(準備完了・ローカル記録など)はこの欄の中で出す(閉じている間はカメラを押し下げない) -->
+      <!-- 注記(取り込み完了・ローカル記録など)はこの欄の中で出す(閉じている間はカメラを押し下げない) -->
       <p v-if="offlineNote" class="offline-desc offline-note-line">{{ offlineNote }}</p>
 
       <h2>読み取り音</h2>

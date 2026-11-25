@@ -1,16 +1,17 @@
 import { readBody } from 'h3'
 import { parseRegistrationCode } from '#shared/utils/registration'
 import { SCAN_CODE_MAX_LENGTH, SCAN_CODES_MAX, type ScanFlushResponse } from '#shared/utils/scan'
+import { findSource } from '../utils/syncRun'
 import { flushScan, findScanMode, type ScanFlushInput } from '../utils/scanRun'
-import { loadSyncSettings } from '../utils/syncRun'
 
 /**
- * 記録の確定(シートへの書き込み + items payload 反映 + 証跡 scan_events)。登録済みユーザのみ。
+ * 記録の確定(**シートへの書き込み** + 証跡 scan_events)。登録済みユーザのみ。
  *
- * 連続スキャンの「書き込みを確定」/自動flush(5件)から叩く。
- * codes は文字列 or `{ code, overwrite }` のどちらでも受け取る(確認モードの「上書き」は overwrite: true)。
- * 書き込み順は remark-update と同じ「シート → items payload」。payload 更新だけが失敗すると
- * dbUpdated: false を返す(シートは保存済みなので次の同期で一致する)。
+ * 連続スキャンの「書き込みを確定」/自動flush(SCAN_AUTO_FLUSH_COUNT)から叩く。
+ * 対象シートは mode.sourceId のデータセット(モード = 1データセットに紐づく)。
+ * codes は文字列 or `{ code, overwrite, at }` のどちらでも受け取る(確認モードの「上書き」は overwrite: true、
+ * ローカルにためた読み取りの確定は `at` = 読み取り日時を送る = シートの日時セルと証跡に載る)。
+ * payload 反映はしない(シートが唯一の正。端末ミラーは画面が応答の written を写す)。
  */
 export default defineEventHandler(async (event): Promise<ScanFlushResponse> => {
   const { user } = await requireRegisteredUser(event)
@@ -26,11 +27,15 @@ export default defineEventHandler(async (event): Promise<ScanFlushResponse> => {
 
   const inputs: ScanFlushInput[] = []
   for (const item of body!.codes!) {
-    const code = typeof item === 'string' ? item : typeof (item as { code?: unknown })?.code === 'string' ? String((item as { code: string }).code) : ''
-    const trimmed = code.trim()
+    const o = (item && typeof item === 'object' ? item : { code: item }) as { code?: unknown; overwrite?: unknown; at?: unknown }
+    const trimmed = String(o.code ?? '').trim()
     if (!trimmed || trimmed.length > SCAN_CODE_MAX_LENGTH) continue
     if (parseRegistrationCode(trimmed)) continue // 利用者登録QRは記録しない(黙って全件を消さないように here で除く)
-    inputs.push({ code: trimmed, overwrite: (item as { overwrite?: unknown })?.overwrite === true })
+    inputs.push({
+      code: trimmed,
+      overwrite: o.overwrite === true,
+      at: typeof o.at === 'string' ? o.at : undefined,
+    })
     if (inputs.length >= SCAN_CODES_MAX) break
   }
   if (inputs.length === 0) {
@@ -38,14 +43,17 @@ export default defineEventHandler(async (event): Promise<ScanFlushResponse> => {
   }
 
   const mode = await findScanMode(event, modeId)
-  const { settings } = await loadSyncSettings(event)
-  const flushed = await flushScan(event, mode, settings, user.email ?? null, inputs)
+  if (mode.sourceId === null) {
+    throw createError({ statusCode: 400, statusMessage: `モード "${mode.name}" のデータセットが未指定です(記録の設定でデータセットを選んでください)` })
+  }
+  const source = await findSource(event, mode.sourceId)
+  const flushed = await flushScan(event, mode, source, user.email ?? null, inputs)
 
   return {
     modeId,
     sheetTitle: flushed.sheetTitle,
     results: flushed.results,
     wrote: flushed.wrote,
-    dbUpdated: flushed.dbUpdated,
+    auditWritten: flushed.auditWritten,
   }
 })

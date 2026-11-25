@@ -1,28 +1,34 @@
 import { readBody } from 'h3'
-import { normalizeSettings, type SyncConfigResponse, type SyncSettings } from '#shared/utils/sync'
+import { normalizeSources, type SourceConfigResponse, type SyncSource } from '#shared/utils/sync'
 import { readServiceAccountKey } from '../utils/googleSheets'
+import { saveSources } from '../utils/syncRun'
 
 /**
- * 同期設定の保存(singleton 行 id=1 の upsert)。登録済みユーザのみ。
- * 入力は normalizeSettings で正規化する(不正なテーブル名/ID は既定値へ補正)。
- * spreadsheetId の空文字は保存できる(未設定 = 同期は 400 で拒否される)。
+ * データセット(取り込み定義)の保存(追加・更新・削除)。登録済みユーザのみ。
+ * 送られたリストが正 = リストに無い id の行は削除される(動的増減)。id 無しは新規 insert。
+ * 入力は normalizeSources で正規化する(不正スプレッドシート ID・空名・重複名は項目単位で補正し throw しない)。
+ * spreadsheetId の空文字は保存できる(未設定 = 取り込みは 400 で拒否される)。
+ * 記録モード(scan_modes.source_id)が紐づくデータセットの削除は FK の restrict で 400 にする。
  */
-export default defineEventHandler(async (event): Promise<SyncConfigResponse> => {
+export default defineEventHandler(async (event): Promise<SourceConfigResponse> => {
   const { user } = await requireRegisteredUser(event)
 
-  const body = await readBody<Partial<SyncSettings>>(event)
-  if (!body || typeof body !== 'object') {
-    throw createError({ statusCode: 400, statusMessage: '設定本体が必要です' })
+  const body = await readBody<{ sources?: unknown }>(event)
+  if (!body || typeof body !== 'object' || !Array.isArray(body.sources)) {
+    throw createError({ statusCode: 400, statusMessage: 'sources のリストが必要です' })
   }
-  const settings = normalizeSettings(body)
+  const sources = normalizeSources(body.sources)
+  if (sources.length === 0) {
+    throw createError({ statusCode: 400, statusMessage: 'データセットを 1つ以上残してください(すべて削除はできません)' })
+  }
 
-  const { updatedAt } = await saveSyncSettings(event, settings, user.email ?? null)
+  const saved = await saveSources(event, sources, user.email ?? null)
 
   return {
-    settings,
+    sources: saved.sources as SyncSource[],
     serviceAccountConfigured: readServiceAccountKey() !== null,
     updatedBy: user.email ?? null,
-    updatedAt,
+    updatedAt: saved.updatedAt,
     rowMissing: false,
   }
 })

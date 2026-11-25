@@ -1,21 +1,38 @@
 <script setup lang="ts">
 // 保護は app/middleware/auth.global.ts(グローバル+ホワイトリスト)で行う
 
+import { describeApiError } from '#shared/utils/apiError'
 import { isQuantityKey, ITEM_GROUP_KEY, ITEM_NAME_KEY, ITEM_REMARK_KEY, ITEM_YEAR_KEY, payloadValue, quantityName, REMARK_MAX_LENGTH } from '#shared/utils/items'
 import { formatJst, scanStatusMessage, type ScanHistoryResponse } from '#shared/utils/scan'
 import type { OfflineMeta } from '#shared/utils/offline'
+import { mirrorBelongsToUser } from '#shared/utils/offline'
+import type { MeState } from '#shared/utils/auth'
 
 const route = useRoute()
 const code = computed(() => String(route.query.code ?? ''))
+/** 認証状態(SSR が埋め込む)。端末ミラーの uid と比較して別利用者の氏名を照会結果に出さない。 */
+const authState = useState<MeState | null>('auth-state', () => null)
 
-type LookupResult = { found: boolean; code: string; row: Record<string, unknown> | null; productOrder?: string[] }
+/** 端末ミラーが「今ログインしている利用者」のデータか(有効フラグ + uid 一致)。 */
+function localMirror(meta: OfflineMeta | null): boolean {
+  return meta?.enabled === true && mirrorBelongsToUser(meta, authState.value?.uid)
+}
+
+type LookupResult = {
+  found: boolean
+  code: string
+  row: { code: string; payload: Record<string, string> } | null
+  productOrder?: string[]
+  sourceId?: number
+  sheetTitle?: string
+}
 type RemarkUpdateResponse = {
   ok: true
   code: string
   remark: string
   sheetTitle: string
   range: string
-  dbUpdated: boolean
+  sourceId: number
 }
 
 // SSR で解決した結果は useState 経由で hydration 時にクライアントへ引き継がれる(再fetch防止)。
@@ -27,29 +44,38 @@ const offlineLookup = useState<boolean>('lookup-offline', () => false)
 const offlineMeta = useState<OfflineMeta | null>('lookup-offline-meta', () => null)
 
 async function fetchLookup(c: string) {
+  // 作業中のデータセット(取り込み済みのミラーと同じシート)を照会する。未取り込みは server が有効な最初のデータセットを選ぶ。
+  const meta = readOfflineMetaFromStorage()
+  const local = localMirror(meta)
   try {
     result.value = await $fetch<LookupResult>('/api/lookup', {
       method: 'POST',
-      body: { code: c },
+      body: { code: c, sourceId: local && meta ? meta.sourceId : undefined },
       headers: useRequestHeaders(['cookie']),
     })
     errorMessage.value = null
     offlineLookup.value = false
     offlineMeta.value = null
   } catch (e: unknown) {
-    // オフラインモードでは /api/lookup の失敗をローカルスナップショットの照会にフォールバックする
+    // ローカル作業では /api/lookup の失敗を端末ミラーの照会にフォールバックする
     // (地下での「照会」。SSR は storage を読めないのでこの経路は client の遷移のみ)。
-    const meta = readOfflineMetaFromStorage()
-    if (meta?.enabled) {
-      const row = await offlineGetItem(c).catch(() => undefined)
-      // payloadValue 等は Record<string, unknown> で読む(items-list の行と同じ形。index signature の cast は行データの既知の形に対する安全な widening)
-      result.value = { found: row !== undefined, code: c, row: row ? (row as unknown as Record<string, unknown>) : null }
+    // uid 不一致(別利用者が取り込んだミラー)ではフォールバックしない = 通信の照会失敗として出す。
+    if (local && meta) {
+      const row = await offlineGetItem(meta.sourceId, c).catch(() => undefined)
+      result.value = {
+        found: row !== undefined,
+        code: c,
+        row: row ? { code: row.code, payload: row.payload } : null,
+        productOrder: meta.source.includeColumns.length ? productOrderKeys(meta.source.includeColumns, meta.source.rename) : [],
+        sourceId: meta.sourceId,
+        sheetTitle: meta.config.sheetTitle ?? '',
+      }
       offlineLookup.value = true
       offlineMeta.value = meta
       errorMessage.value = null
       return
     }
-    errorMessage.value = e instanceof Error ? e.message : String(e)
+    errorMessage.value = describeApiError(e).friendly
   }
 }
 
@@ -84,7 +110,8 @@ async function fetchHistory(c: string) {
     return
   }
   // オフラインモード中は履歴(/api/scan-history)を通信しない(照会本体はローカルフォールバックで出る)。
-  if (readOfflineMetaFromStorage()?.enabled) {
+  // 別利用者のミラー(uid 不一致)では通信するので履歴も通信する。
+  if (localMirror(readOfflineMetaFromStorage())) {
     history.value = null
     historyFor.value = c
     return
@@ -106,7 +133,7 @@ if (code.value && !historyCachedForCurrentCode) {
   await fetchHistory(code.value)
 }
 
-/** 備考欄のインライン編集(保存は /api/remark-update → シートと items payload に反映)。 */
+/** 備考欄のインライン編集(保存は /api/remark-update → シートへ。端末ミラーにも同じ値を写す)。 */
 const editingRemark = ref(false)
 const remarkDraft = ref('')
 const remarkBusy = ref(false)
@@ -133,17 +160,24 @@ async function saveRemark() {
       body: { code: result.value.code, remark: remarkDraft.value },
     })
     // 保存結果を再fetchなしで画面に反映(trim 後の値。空はキー削除 = 取り込み側の empty skip と同じ)
-    const p = { ...(result.value.row.payload ?? {}) } as Record<string, unknown>
+    const p = { ...(result.value.row.payload ?? {}) } as Record<string, string>
     if (res.remark) p[ITEM_REMARK_KEY] = res.remark
     else delete p[ITEM_REMARK_KEY]
     result.value = { ...result.value, row: { ...result.value.row, payload: p } }
     editingRemark.value = false
-    // シートは更新済みだが DB 更新が失敗したケース(次の同期で一致する)を注記として残す
-    if (!res.dbUpdated) {
-      remarkError.value = 'スプレッドシートには保存済みです(DB の反映に失敗したため、次の同期で一致します)'
+    // 端末ミラーにも同じ値を書く(取り込み済みのデータセットなら一覧・照会が即時に追随する)。
+    // ミラー更新の失敗はシート保存を止めない(注記だけ出す = 次の取り込みで一致する)。
+    // uid 不一致(別利用者のミラー)には書かない(別ユーザの端末データを自分の備考で汚さない)。
+    const meta = readOfflineMetaFromStorage()
+    if (meta?.enabled && localMirror(meta) && meta.sourceId === res.sourceId) {
+      try {
+        await offlineSetPayloadKey(meta.sourceId, res.code, ITEM_REMARK_KEY, res.remark)
+      } catch {
+        remarkError.value = 'シートには保存済みです(端末内のデータの更新に失敗したため、次の取り込みで一致します)'
+      }
     }
   } catch (e: unknown) {
-    remarkError.value = e instanceof Error ? e.message : String(e)
+    remarkError.value = describeApiError(e).friendly
   } finally {
     remarkBusy.value = false
   }
@@ -284,14 +318,7 @@ const entries = computed<Array<[string, string]>>(() => {
     if (!taken.has(k)) pushDetail(pairs, taken, k, v)
   }
 
-  // payload 以外の列。code/imported_at は見出し・末尾で出すのでここでは省略する。
-  for (const [k, v] of Object.entries(r)) {
-    if (k === 'payload' || k === 'code' || k === 'imported_at') continue
-    pushDetail(pairs, taken, k, v)
-  }
-  if (typeof r.imported_at === 'string') {
-    pushDetail(pairs, taken, '取り込み日時', formatImportedAt(r.imported_at))
-  }
+  // シート由来の行は { code, payload } の2列だけ(payload 以外に表示列は無い)。
   return pairs
 })
 
@@ -318,14 +345,6 @@ function formatMoney(key: string, v: unknown): string {
 function groupThousands(digits: string): string {
   return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
 }
-
-/** ISOタイムスタンプを JST の固定表記へ(環境非依存の文字列にする)。 */
-function formatImportedAt(iso: string): string {
-  const ms = Date.parse(iso)
-  if (Number.isNaN(ms)) return iso
-  const jst = new Date(ms + 9 * 60 * 60 * 1000).toISOString().slice(0, 16)
-  return `${jst.replace('T', ' ')} (JST)`
-}
 </script>
 
 <template>
@@ -344,7 +363,7 @@ function formatImportedAt(iso: string): string {
       <p class="result-code">コード {{ code }}</p>
       <p class="result-empty-text">該当するデータが見つかりませんでした。</p>
       <p v-if="offlineLookup" class="muted offline-note">
-        オフラインのスナップショット({{ offlineMeta?.itemCount ?? 0 }}件・準備 {{ formatJst(offlineMeta?.snapshotAt ?? '') }})の中にもありません。
+        この端末のデータ({{ offlineMeta?.itemCount ?? 0 }}件・取り込み {{ formatJst(offlineMeta?.snapshotAt ?? '') }})の中にもありません。
       </p>
     </div>
 
@@ -358,9 +377,9 @@ function formatImportedAt(iso: string): string {
         <p class="result-code">コード {{ result.code }}</p>
       </div>
 
-      <!-- オフラインフォールバック照会: スナップショットからの照会である旨と、履歴・備考編集がオンライン限定であることを注記する -->
+      <!-- ローカル照会: この端末のデータからの照会である旨と、履歴・備考編集がオンライン限定であることを注記する -->
       <p v-if="offlineLookup" class="muted offline-note">
-        オフラインのスナップショットから照会しました(準備 {{ formatJst(offlineMeta?.snapshotAt ?? '') }} / {{ offlineMeta?.itemCount ?? 0 }}件)。スキャン履歴と備考の編集は通信が復旧してから利用できます。
+        この端末のデータから照会しました(取り込み {{ formatJst(offlineMeta?.snapshotAt ?? '') }} / {{ offlineMeta?.itemCount ?? 0 }}件)。スキャン履歴と備考の編集は通信が戻ってから利用できます。
       </p>
 
       <!-- 金額・支払いのまとまり(1つの枠に3セル) -->

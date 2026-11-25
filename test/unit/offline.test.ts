@@ -1,10 +1,13 @@
 /**
- * オフラインモードの共通ロジック(shared/utils/offline.ts)の単体テスト。
+ * ローカルデータセットの共通ロジック(shared/utils/offline.ts)の単体テスト。
  * IndexedDB / localStorage の実装(app/utils/offlineStore.ts)は client ののみなのでここでは叩かない。
  */
 import { describe, expect, it } from 'vitest'
 import {
+  datasetKey,
+  localWorkAllowed,
   makeOfflineQueueId,
+  mirrorBelongsToUser,
   normalizeOfflineEntries,
   offlineFacets,
   offlineItemsQuery,
@@ -15,9 +18,11 @@ import {
   type OfflineMeta,
 } from '../../shared/utils/offline'
 import { SCAN_CODE_MAX_LENGTH, normalizeScanModes, stateOfPayload, type ScanConfigResponse, type ScanMode } from '../../shared/utils/scan'
+import { DEFAULT_SOURCE, type SyncSource } from '../../shared/utils/sync'
 
 const checkinMode: ScanMode = {
   id: 2,
+  sourceId: 1,
   name: 'チェックイン',
   actions: [{ column: '来場済', columnAt: '来場日時', literal: '済', payloadKey: '来場済', payloadAtKey: '来場日時' }],
   dedupe: 'warn',
@@ -28,26 +33,57 @@ const checkinMode: ScanMode = {
   updatedBy: null,
 }
 
+/** テスト用のデータセット定義(id 付きの 1行)。 */
+const sourceA: SyncSource = { ...DEFAULT_SOURCE, id: 1, name: 'チケットA', spreadsheetId: '1Abc-def_1234567890' }
+
 const baseConfig: ScanConfigResponse = {
   modes: [checkinMode],
+  sources: [sourceA],
   serviceAccountConfigured: true,
-  syncIncludeColumns: ['来場済', '来場日時'],
   rowMissing: false,
+  sourceMissing: false,
   sheetTitle: 'dev',
   sheetHeaders: ['code', '氏名', '来場済', '来場日時'],
 }
 
 const at = '2026-11-17T02:00:00.000Z'
 
+/** ミラーメタのテスト用テンプレート(データセット付き)。 */
+function metaOf(over: Partial<OfflineMeta> = {}): OfflineMeta {
+  return {
+    enabled: true,
+    sourceId: 1,
+    uid: 'uid-1',
+    sourceName: 'チケットA',
+    source: sourceA,
+    snapshotAt: at,
+    itemCount: 1234,
+    config: baseConfig,
+    capped: false,
+    ...over,
+  }
+}
+
+/** parseOfflineMeta が読む JSON を作るときに必須項目(sourceId/uid/source)を必ず载せる。 */
+function metaJson(obj: Record<string, unknown>): string {
+  return JSON.stringify({ sourceId: 1, uid: 'uid-1', sourceName: 'チケットA', source: sourceA, ...obj })
+}
+
 describe('parseOfflineMeta / serializeOfflineMeta', () => {
-  it('serialize→parse で往復できる', () => {
-    const meta: OfflineMeta = { enabled: true, snapshotAt: at, itemCount: 1234, config: baseConfig, capped: false }
+  it('serialize→parse で往復できる(データセットの id・定義も残る)', () => {
+    const meta = metaOf()
     const parsed = parseOfflineMeta(serializeOfflineMeta(meta))
     expect(parsed).not.toBeNull()
     expect(parsed?.enabled).toBe(true)
     expect(parsed?.snapshotAt).toBe(at)
     expect(parsed?.itemCount).toBe(1234)
+    expect(parsed?.sourceId).toBe(1)
+    expect(parsed?.uid).toBe('uid-1')
+    expect(parsed?.sourceName).toBe('チケットA')
+    expect(parsed?.source.codeColumn).toBe('ID')
     expect(parsed?.config.modes[0]?.name).toBe('チェックイン')
+    expect(parsed?.config.modes[0]?.sourceId).toBe(1)
+    expect(parsed?.config.sources.map((s) => s.name)).toEqual(['チケットA'])
   })
 
   it('破損・空・非オブジェクトは null(無効扱い)', () => {
@@ -57,31 +93,81 @@ describe('parseOfflineMeta / serializeOfflineMeta', () => {
     expect(parseOfflineMeta('[]')).toBeNull()
     expect(parseOfflineMeta('{}')).toBeNull()
     // snapshotAt が日時として不正
-    expect(parseOfflineMeta(JSON.stringify({ enabled: true, snapshotAt: 'zz', itemCount: 1, config: { modes: [] } }))).toBeNull()
-    // config.modes が配列でなければ null(モード選択が壊れたスナップショットを有効にしない)
-    expect(parseOfflineMeta(JSON.stringify({ enabled: true, snapshotAt: at, itemCount: 1, config: {} }))).toBeNull()
+    expect(parseOfflineMeta(metaJson({ enabled: true, snapshotAt: 'zz', itemCount: 1, config: { modes: [] } }))).toBeNull()
+    // config.modes が配列でなければ null(モード選択が壊れたミラーを有効にしない)
+    expect(parseOfflineMeta(metaJson({ enabled: true, snapshotAt: at, itemCount: 1, config: {} }))).toBeNull()
+  })
+
+  it('旧形(データセット前のスナップショット)は null = 再取り込みを促す', () => {
+    expect(parseOfflineMeta(JSON.stringify({ enabled: true, snapshotAt: at, itemCount: 1, config: { modes: [] } }))).toBeNull()
+    expect(parseOfflineMeta(metaJson({ enabled: true, snapshotAt: at, itemCount: 1, config: { modes: [] }, sourceId: 0 }))).toBeNull()
+    expect(parseOfflineMeta(metaJson({ enabled: true, snapshotAt: at, itemCount: 1, config: { modes: [] }, sourceId: 'x' }))).toBeNull()
+  })
+
+  it('uid が無い・空・非文字列のメタは null(別ユーザが読めるミラーを有効にしない)', () => {
+    const base = { enabled: true, snapshotAt: at, itemCount: 2, config: { modes: [] } }
+    expect(parseOfflineMeta(JSON.stringify({ sourceId: 1, sourceName: 'チケットA', source: sourceA, ...base }))).toBeNull()
+    expect(parseOfflineMeta(metaJson({ ...base, uid: '' }))).toBeNull()
+    expect(parseOfflineMeta(metaJson({ ...base, uid: '   ' }))).toBeNull()
+    expect(parseOfflineMeta(metaJson({ ...base, uid: 42 }))).toBeNull()
+    expect(parseOfflineMeta(metaJson({ ...base, uid: 'uid-1' }))?.enabled).toBe(true)
+    expect(parseOfflineMeta(metaJson({ ...base, uid: 'uid-1' }))?.uid).toBe('uid-1')
   })
 
   it('DB の snake_case actions も normalize で補われる(jsonb 由来の形そのままでも動く)', () => {
-    const raw = JSON.stringify({
+    const raw = metaJson({
       enabled: true,
       snapshotAt: at,
       itemCount: 2,
       config: {
-        modes: [{ id: 3, name: '棚卸し', actions: [{ column: '確認済', column_at: '確認日時', literal: '済', payload_key: '確認済', payload_at_key: '確認日時' }] }],
-        syncIncludeColumns: ['確認済'],
+        modes: [{ id: 3, source_id: 2, name: '棚卸し', actions: [{ column: '確認済', column_at: '確認日時', literal: '済', payload_key: '確認済', payload_at_key: '確認日時' }] }],
+        sources: [{ id: 2, name: 'チケットB' }],
         rowMissing: false,
       },
     })
     const parsed = parseOfflineMeta(raw)
     expect(parsed?.config.modes[0]?.actions[0]?.payloadAtKey).toBe('確認日時')
+    expect(parsed?.config.modes[0]?.sourceId).toBe(2)
+    expect(parsed?.config.sources[0]?.name).toBe('チケットB')
     expect(parsed?.config.sheetTitle).toBeNull()
     expect(parsed?.config.sheetHeaders).toBeNull()
   })
 
   it('enabled: false は valid なメタとして通る(解除 = フラグ false でデータ残)', () => {
-    const raw = JSON.stringify({ enabled: false, snapshotAt: at, itemCount: 5, config: { modes: [] } })
+    const raw = metaJson({ enabled: false, snapshotAt: at, itemCount: 5, config: { modes: [] } })
     expect(parseOfflineMeta(raw)?.enabled).toBe(false)
+    expect(parseOfflineMeta(raw)?.sourceId).toBe(1)
+  })
+})
+
+describe('datasetKey(複数データセットを同じストアに住ませる)', () => {
+  it('sourceId|code の複合キー(別シートの同じ code が別人を指すので code 単独は使えない)', () => {
+    expect(datasetKey(1, '1001')).toBe('1|1001')
+    expect(datasetKey(2, '1001')).toBe('2|1001')
+    expect(datasetKey(1, '1001')).not.toBe(datasetKey(2, '1001'))
+  })
+})
+
+describe('mirrorBelongsToUser / localWorkAllowed(ミラーの uid 紐づけ)', () => {
+  it('meta.uid と現在の uid が一致するときだけ true', () => {
+    expect(mirrorBelongsToUser(metaOf({ uid: 'uid-a' }), 'uid-a')).toBe(true)
+    expect(mirrorBelongsToUser(metaOf({ uid: 'uid-a' }), 'uid-b')).toBe(false)
+  })
+
+  it('どちらかの uid が欠けている・空・空白は false(保守側)', () => {
+    expect(mirrorBelongsToUser(metaOf({ uid: 'uid-a' }), null)).toBe(false)
+    expect(mirrorBelongsToUser(metaOf({ uid: 'uid-a' }), undefined)).toBe(false)
+    expect(mirrorBelongsToUser(metaOf({ uid: 'uid-a' }), '')).toBe(false)
+    expect(mirrorBelongsToUser(metaOf({ uid: '' }), 'uid-a')).toBe(false)
+    expect(mirrorBelongsToUser(null, 'uid-a')).toBe(false)
+    expect(mirrorBelongsToUser(undefined, 'uid-a')).toBe(false)
+  })
+
+  it('localWorkAllowed は enabled フラグと uid 一致の両方を要求する', () => {
+    expect(localWorkAllowed(metaOf({ uid: 'uid-a' }), 'uid-a')).toBe(true)
+    expect(localWorkAllowed(metaOf({ uid: 'uid-a', enabled: false }), 'uid-a')).toBe(false)
+    expect(localWorkAllowed(metaOf({ uid: 'uid-a' }), 'uid-other')).toBe(false)
+    expect(localWorkAllowed(null, 'uid-a')).toBe(false)
   })
 })
 
@@ -190,8 +276,8 @@ describe('makeOfflineQueueId', () => {
 
 // normalizeScanModes は parseOfflineMeta の内部で使う(スナップショットのモード補正)。壊れた形でも落ちない。
 describe('parseOfflineMeta のモード補正(normalizeScanModes)', () => {
-  it('重複名前・不正項目はスナップショット側で除かれる', () => {
-    const raw = JSON.stringify({
+  it('重複名前・不正項目はミラー側で除かれる', () => {
+    const raw = metaJson({
       enabled: true,
       snapshotAt: at,
       itemCount: 1,

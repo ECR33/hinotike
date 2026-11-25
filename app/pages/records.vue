@@ -2,6 +2,7 @@
 // 記録履歴(scan_events)の閲覧画面。監査目的: 「いつ・誰が・どのモードで・何を書いたか」を日時付きで出す。
 // 保護は app/middleware/auth.global.ts(グローバル+ホワイトリスト)が自動で守る(新規ページはデフォルト拒否)。
 // 分页は seq(挿入順の連番)降順のキーセットカーソル。uuid は time-order ではないのでカーソルに使えない。
+import { describeApiError } from '#shared/utils/apiError'
 import type { ScanConfigResponse, ScanHistoryResponse, ScanHistoryRow, ScanStatus } from '#shared/utils/scan'
 import { formatJst, scanStatusMessage } from '#shared/utils/scan'
 
@@ -50,7 +51,7 @@ async function reload() {
     total.value = res.total
     nextCursor.value = res.nextCursor
   } catch (e: unknown) {
-    errorMessage.value = e instanceof Error ? e.message : String(e)
+    errorMessage.value = describeApiError(e).friendly
   } finally {
     loading.value = false
   }
@@ -70,7 +71,7 @@ async function loadMore() {
     total.value = res.total
     nextCursor.value = res.nextCursor
   } catch (e: unknown) {
-    errorMessage.value = e instanceof Error ? e.message : String(e)
+    errorMessage.value = describeApiError(e).friendly
   } finally {
     loading.value = false
   }

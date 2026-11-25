@@ -1,3 +1,7 @@
+// ページキャッシュ名は端末データの削除(`app/utils/offlineStore.ts` の `offlineClearPageCache`)が消す名前なので
+// 共有モジュールから1つの値を imported する(Workbox の cacheName と削除側のズレ防止)。
+import { OFFLINE_PAGE_CACHE_NAME } from './shared/utils/offline'
+
 export default defineNuxtConfig({
   compatibilityDate: '2025-09-14',
   devtools: { enabled: false },
@@ -51,12 +55,14 @@ export default defineNuxtConfig({
       // 地下などの通信失敗/タイムアウト時だけ缓存を返す)。/result・/items は SPA 遷移で開くので
       // precache された JS チャンクで動き、HTML の缓存は不要(/result はローカル照会にフォールバックする)。
       // pattern は URL の末尾が / か /scan のものだけ(API path には当たらない)。
+      // cacheName は shared/utils/offline の OFFLINE_PAGE_CACHE_NAME と同じ値(端末データの削除で caches.delete する)。
+      // 缓存 HTML には氏名(/items の1ページ目は SSR で描画)と email(/ のログイン状態)が載ることに注意。
       runtimeCaching: [
         {
           urlPattern: /\/(?:|items|scan)$/,
           handler: 'NetworkFirst',
           options: {
-            cacheName: 'hinotike-pages',
+            cacheName: OFFLINE_PAGE_CACHE_NAME,
             networkTimeoutSeconds: 3,
             cacheableResponse: { statuses: [200] },
           },

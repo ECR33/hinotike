@@ -1,14 +1,25 @@
 /**
- * Google Spreadsheet → Supabase の同期ロジック(純粋関数)。
+ * Google Spreadsheet → スマホ内(IndexedDB)の取り込み定義(純粋関数)。
  *
- * 設定は DB(public.sync_settings)の 1 行が正。管理 UI(/sync)から編集できる。
- * DEFAULT_SYNC_SETTINGS は初回シード用(migrations/0003 の insert と同じ値)。
- * 取り込みの選別・rename・code 空スキップはここが唯一の実装で、
- * API(server/api/sync-*)と CLI(scripts/sync-sheets.ts)が同じ関数を使う。
+ * 設計(2026-11-22 の複数データセット化):
+ * - 取り込み**定義**は DB(public.sync_sources)の**複数行**が正。1行 = 1データセット
+ *   (スプレッドシート + ワークシート + code カラム + 取り込みカラムの選別)。管理 UI(/sync)から編集する。
+ * - データ本体は Supabase に置かない。取り込みは `GET /api/import`(Worker がサービスアカウント鍵で
+ *   シートを読み、`mapSheetRows` した行を chunk で返す)→ 画面が IndexedDB に保存する。
+ *   シートが唯一の正(source of truth)で、書き戻しは `/api/scan-flush` / `/api/remark-update` が
+ *   シートへ直接書く(旧 `items` テーブルへの payload 反映は廃止)。
+ * - 選別・rename・code 空スキップはここが唯一の実装。API(server/api/*)と画面のローカル照合
+ *   (shared/utils/offline.ts)が同じ関数・同じ意味で動く。
+ * Nuxt 依存の import は置かない(server / shared / CLI どちらでも読めるように)。
  */
 
-export interface SyncSettings {
-  /** Google スプレッドシート ID(未設定なら同期できない) */
+/** 1データセットの取り込み定義(public.sync_sources の 1行)。 */
+export interface SyncSource {
+  /** DB の serial id。未作成(新規ドラフト)は null */
+  id: number | null
+  /** 画面の選択に出す表示名(DB は name UNIQUE。重複は normalize で除く) */
+  name: string
+  /** Google スプレッドシート ID(未設定なら取り込みできない) */
   spreadsheetId: string
   /** 対象ワークシート名。null/空なら最初シート */
   worksheet: string | null
@@ -19,22 +30,24 @@ export interface SyncSettings {
   /** includeColumns が空のときに除外するカラム名 */
   excludeColumns: string[]
   /**
-   * 行の有効/無効を表すカラム名。null/空 = 行フィルタなし(全行读取込み対象)。
+   * 行の有効/無効を表すカラム名。null/空 = 行フィルタなし(全行が取り込み対象)。
    * 指定すると、このカラムの値が filterValues に合う行のみ取り込む(値の比較は trim 後の完全一致)。
    */
   filterColumn: string | null
   /** filterColumn の許容値(複数可)。空リスト = そのカラムの値が非空なら有効 */
   filterValues: string[]
-  /** true = 確定時に、今回のシートで取り込み対象だった code に無い items 行を削除する(prune) */
-  pruneOnCommit: boolean
   /** payload のキー名を書き換える: { "元カラム名": "新キー名" } */
   rename: Record<string, string>
-  /** 書き込み先のテーブル名 */
-  targetTable: string
+  /** false = 画面のソース選択に出さない(削除せずに運用を止める) */
+  enabled: boolean
+  updatedAt: string | null
+  updatedBy: string | null
 }
 
-/** migrations/0003_sync_settings.sql のシード行と同じ値(片方を変えたらもう片方も直す)。 */
-export const DEFAULT_SYNC_SETTINGS: SyncSettings = {
+/** migrations/0007_data_sources.sql のシード行と同じ値(片方を変えたらもう片方も直す)。 */
+export const DEFAULT_SOURCE: SyncSource = {
+  id: null,
+  name: '既定のシート',
   spreadsheetId: '',
   worksheet: 'フォームの回答 1',
   codeColumn: 'ID',
@@ -59,14 +72,10 @@ export const DEFAULT_SYNC_SETTINGS: SyncSettings = {
   excludeColumns: [],
   filterColumn: null,
   filterValues: [],
-  pruneOnCommit: false,
   rename: { '領収書が必要な方はチェックをお願いします。': '領収書' },
-  targetTable: 'items',
-}
-
-/** テーブル名: 小文字英数字と _ のみ(PostgREST のテーブル名として安全な形に限定)。 */
-export function isSafeTableName(name: unknown): name is string {
-  return typeof name === 'string' && /^[a-z][a-z0-9_]{0,62}$/.test(name)
+  enabled: true,
+  updatedAt: null,
+  updatedBy: null,
 }
 
 /** スプレッドシート ID: 英数字・ハイフン・アンダースコア(Google が発行する形)。 */
@@ -74,18 +83,26 @@ export function isSafeSpreadsheetId(name: unknown): name is string {
   return typeof name === 'string' && /^[A-Za-z0-9_-]{10,120}$/.test(name)
 }
 
+/** データセットの表示名(チップと UNIQUE キー用)。 */
+export const SOURCE_NAME_MAX_LENGTH = 40
+
+export function isSafeSourceName(name: unknown): name is string {
+  return typeof name === 'string' && name.trim().length > 0 && name.trim().length <= SOURCE_NAME_MAX_LENGTH
+}
+
 /**
  * UI/API から来た生データを正規化する。不正な値は DEFAULT にフォールバックする
  * (throw すると保存画面が固まるため、項目単位で補正する)。
- * spreadsheetId は空文字を許す(未設定 = 同期不可。API 側で 400 にする)。
+ * spreadsheetId は空文字を許す(未設定 = 取り込み不可。API 側で 400 にする)。
  */
-export function normalizeSettings(raw: Partial<SyncSettings> | null | undefined): SyncSettings {
-  const base = DEFAULT_SYNC_SETTINGS
+export function normalizeSource(raw: Partial<SyncSource> | null | undefined): SyncSource {
+  const base = DEFAULT_SOURCE
   const spreadsheetId =
-    typeof raw?.spreadsheetId === 'string'
-      ? raw.spreadsheetId.trim()
-      : ''
+    typeof raw?.spreadsheetId === 'string' ? raw.spreadsheetId.trim() : ''
+  const name = typeof raw?.name === 'string' ? raw.name.trim().slice(0, SOURCE_NAME_MAX_LENGTH) : ''
   return {
+    id: typeof raw?.id === 'number' && Number.isInteger(raw.id) ? raw.id : null,
+    name: name || '名称未設定',
     spreadsheetId: isSafeSpreadsheetId(spreadsheetId) ? spreadsheetId : '',
     worksheet:
       typeof raw?.worksheet === 'string' && raw.worksheet.trim()
@@ -108,7 +125,6 @@ export function normalizeSettings(raw: Partial<SyncSettings> | null | undefined)
     filterValues: Array.isArray(raw?.filterValues)
       ? raw!.filterValues!.filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim())
       : [],
-    pruneOnCommit: raw?.pruneOnCommit === true,
     rename:
       raw?.rename && typeof raw.rename === 'object' && !Array.isArray(raw.rename)
         ? Object.fromEntries(
@@ -117,14 +133,36 @@ export function normalizeSettings(raw: Partial<SyncSettings> | null | undefined)
             ).map(([from, to]) => [from.trim(), (to as string).trim()]),
           )
         : {},
-    targetTable: isSafeTableName(raw?.targetTable) ? raw!.targetTable! : base.targetTable,
+    enabled: raw?.enabled !== false,
+    updatedAt: typeof raw?.updatedAt === 'string' ? raw.updatedAt : null,
+    updatedBy: typeof raw?.updatedBy === 'string' ? raw.updatedBy : null,
   }
 }
 
-/** DB 行(public.sync_settings の snake_case)→ SyncSettings。 */
-export function settingsFromDb(row: Record<string, unknown> | null | undefined): SyncSettings {
-  if (!row) return { ...DEFAULT_SYNC_SETTINGS }
-  return normalizeSettings({
+/** 複数ソースのリストを正規化する(名前重複は最初の1つだけ残す。DB の UNIQUE と同じ契約)。 */
+export function normalizeSources(raw: unknown): SyncSource[] {
+  const items = Array.isArray(raw) ? raw : []
+  const seen = new Set<string>()
+  const out: SyncSource[] = []
+  for (const item of items) {
+    const source = normalizeSource(item as Partial<SyncSource>)
+    if (seen.has(source.name)) continue
+    seen.add(source.name)
+    out.push(source)
+    if (out.length >= SOURCE_MAX) break
+  }
+  return out
+}
+
+/** 保持できるデータセット数の上限(設定画面の膨張と、シート読み取りの連打を防ぐ)。 */
+export const SOURCE_MAX = 20
+
+/** DB 行(public.sync_sources の snake_case)→ SyncSource。 */
+export function sourceFromDb(row: Record<string, unknown> | null | undefined): SyncSource | null {
+  if (!row) return null
+  return normalizeSource({
+    id: typeof row.id === 'number' ? row.id : null,
+    name: typeof row.name === 'string' ? row.name : '',
     spreadsheetId: typeof row.spreadsheet_id === 'string' ? row.spreadsheet_id : '',
     worksheet: typeof row.worksheet === 'string' ? row.worksheet : null,
     codeColumn: typeof row.code_column === 'string' ? row.code_column : undefined,
@@ -132,39 +170,58 @@ export function settingsFromDb(row: Record<string, unknown> | null | undefined):
     excludeColumns: Array.isArray(row.exclude_columns) ? (row.exclude_columns as string[]) : [],
     filterColumn: typeof row.filter_column === 'string' && row.filter_column.trim() ? row.filter_column : null,
     filterValues: Array.isArray(row.filter_values) ? (row.filter_values as string[]) : [],
-    pruneOnCommit: row.prune_on_commit === true,
     rename: (row.rename ?? {}) as Record<string, string>,
-    targetTable: typeof row.target_table === 'string' ? row.target_table : undefined,
+    enabled: row.enabled !== false,
+    updatedAt: typeof row.updated_at === 'string' ? row.updated_at : null,
+    updatedBy: typeof row.updated_by === 'string' ? row.updated_by : null,
   })
 }
 
-/** SyncSettings → DB の insert/upsert payload。singleton 行(id=1)を確定させる。 */
-export function settingsToDb(s: SyncSettings): Record<string, unknown> {
-  return {
-    id: 1,
-    spreadsheet_id: s.spreadsheetId,
-    worksheet: s.worksheet,
-    code_column: s.codeColumn,
-    include_columns: s.includeColumns,
-    exclude_columns: s.excludeColumns,
-    filter_column: s.filterColumn,
-    filter_values: s.filterValues,
-    prune_on_commit: s.pruneOnCommit,
-    rename: s.rename,
-    target_table: s.targetTable,
+/** SyncSource → DB の insert/update payload(id が null のとき=id 無し = 新規 insert)。 */
+/** DB に書く1データセットの行(snake_case)。Insert/Update の形と一致させる(database.types.ts)。 */
+export interface SyncSourceDbRow {
+  id?: number
+  name: string
+  spreadsheet_id: string
+  worksheet: string | null
+  code_column: string
+  include_columns: string[]
+  exclude_columns: string[]
+  filter_column: string | null
+  filter_values: string[]
+  rename: Record<string, string>
+  enabled: boolean
+  updated_at: string
+}
+
+export function sourceToDb(source: SyncSource): SyncSourceDbRow {
+  const db: SyncSourceDbRow = {
+    name: source.name,
+    spreadsheet_id: source.spreadsheetId,
+    worksheet: source.worksheet,
+    code_column: source.codeColumn,
+    include_columns: source.includeColumns,
+    exclude_columns: source.excludeColumns,
+    filter_column: source.filterColumn,
+    filter_values: source.filterValues,
+    rename: source.rename,
+    enabled: source.enabled,
+    updated_at: new Date().toISOString(),
   }
+  if (source.id !== null) db.id = source.id
+  return db
 }
 
 /** シートヘッダーから取り込み対象カラムを選ぶ(codeColumn は常に保持)。 */
-export function selectColumns(headers: string[], settings: SyncSettings): string[] {
+export function selectColumns(headers: string[], source: SyncSource): string[] {
   let columns = headers
-  if (settings.includeColumns.length > 0) {
-    columns = headers.filter((h) => settings.includeColumns.includes(h))
-  } else if (settings.excludeColumns.length > 0) {
-    columns = headers.filter((h) => !settings.excludeColumns.includes(h))
+  if (source.includeColumns.length > 0) {
+    columns = headers.filter((h) => source.includeColumns.includes(h))
+  } else if (source.excludeColumns.length > 0) {
+    columns = headers.filter((h) => !source.excludeColumns.includes(h))
   }
-  if (settings.codeColumn && !columns.includes(settings.codeColumn)) {
-    columns.push(settings.codeColumn)
+  if (source.codeColumn && !columns.includes(source.codeColumn)) {
+    columns.push(source.codeColumn)
   }
   return columns
 }
@@ -200,14 +257,6 @@ export interface SheetMapping {
   filterColumn: string | null
 }
 
-/**
- * シートの値(1行目=ヘッダー)を { code, payload } へ変換する。
- * - code が空の行はスキップ
- * - filterColumn 設定時は、そのカラムの値(trim)が filterValues のいずれかと一致する行のみ取り込む。
- *   filterValues が空リストなら「値が非空なら有効」(有効レコードの印字なら何でも通す)
- * - 空値(undefined/'')は payload に載せない
- * - rename のキー変換を適用
- */
 /** シート1行目(ヘッダー)を正規化する。空セルは column_N にする(取り込み・セル参照で共通)。 */
 export function normalizeHeaders(rawHeader: unknown[]): string[] {
   return rawHeader.map((h, i) => (h === undefined || h === null || h === '' ? `column_${i + 1}` : String(h)))
@@ -221,25 +270,33 @@ export function sourceColumnFor(payloadKey: string, rename: Record<string, strin
   return payloadKey
 }
 
-export function mapSheetRows(values: unknown[][], settings: SyncSettings): SheetMapping {
+/**
+ * シートの値(1行目=ヘッダー)を { code, payload } へ変換する。
+ * - code が空の行はスキップ
+ * - filterColumn 設定時は、そのカラムの値(trim)が filterValues のいずれかと一致する行のみ取り込む。
+ *   filterValues が空リストなら「値が非空なら有効」(有効レコードの印字なら何でも通す)
+ * - 空値(undefined/'')は payload に載せない
+ * - rename のキー変換を適用
+ */
+export function mapSheetRows(values: unknown[][], source: SyncSource): SheetMapping {
   const headers = normalizeHeaders(values[0] ?? [])
-  const columns = selectColumns(headers, settings)
-  const codeIdx = headers.indexOf(settings.codeColumn)
+  const columns = selectColumns(headers, source)
+  const codeIdx = headers.indexOf(source.codeColumn)
 
   if (codeIdx === -1) {
     return {
       headers, columns, rows: [], skipped: 0, filtered: 0,
-      codeColumnMissing: true, codeColumn: settings.codeColumn,
-      filterColumnMissing: false, filterColumn: settings.filterColumn,
+      codeColumnMissing: true, codeColumn: source.codeColumn,
+      filterColumnMissing: false, filterColumn: source.filterColumn,
     }
   }
 
-  const filterIdx = settings.filterColumn ? headers.indexOf(settings.filterColumn) : -1
-  if (settings.filterColumn && filterIdx === -1) {
+  const filterIdx = source.filterColumn ? headers.indexOf(source.filterColumn) : -1
+  if (source.filterColumn && filterIdx === -1) {
     return {
       headers, columns, rows: [], skipped: 0, filtered: 0,
-      codeColumnMissing: false, codeColumn: settings.codeColumn,
-      filterColumnMissing: true, filterColumn: settings.filterColumn,
+      codeColumnMissing: false, codeColumn: source.codeColumn,
+      filterColumnMissing: true, filterColumn: source.filterColumn,
     }
   }
 
@@ -252,9 +309,9 @@ export function mapSheetRows(values: unknown[][], settings: SyncSettings): Sheet
       skipped += 1
       continue
     }
-    if (settings.filterColumn && filterIdx !== -1) {
+    if (source.filterColumn && filterIdx !== -1) {
       const flag = String(row?.[filterIdx] ?? '').trim()
-      const valid = settings.filterValues.length > 0 ? settings.filterValues.includes(flag) : flag !== ''
+      const valid = source.filterValues.length > 0 ? source.filterValues.includes(flag) : flag !== ''
       if (!valid) {
         filtered += 1
         continue
@@ -262,28 +319,38 @@ export function mapSheetRows(values: unknown[][], settings: SyncSettings): Sheet
     }
     const payload: Record<string, string> = {}
     for (const col of columns) {
-      if (col === settings.codeColumn) continue
+      if (col === source.codeColumn) continue
       const idx = headers.indexOf(col)
       if (idx === -1) continue
       const value = row?.[idx]
       if (value === undefined || value === null || value === '') continue
-      payload[settings.rename[col] ?? col] = String(value)
+      payload[source.rename[col] ?? col] = String(value)
     }
     rows.push({ code, payload })
   }
 
   return {
     headers, columns, rows, skipped, filtered,
-    codeColumnMissing: false, codeColumn: settings.codeColumn,
-    filterColumnMissing: false, filterColumn: settings.filterColumn,
+    codeColumnMissing: false, codeColumn: source.codeColumn,
+    filterColumnMissing: false, filterColumn: source.filterColumn,
   }
 }
 
-/** upsert のバッチサイズ(CLI・API 共通)。 */
-export const UPSERT_BATCH = 200
+/**
+ * 1回の取り込み(import)で読めるシートの行数上限(暴走防止。超えたら truncated=true を返す)。
+ * 旧 sync の MAX_SYNC_ROWS と同じ値。スマホ側の保存上限は shared/utils/offline の OFFLINE_ITEM_MAX。
+ */
+export const MAX_IMPORT_ROWS = 5000
 
-/** シート読み込みの上限行数(暴走防止。超えたら API が 400 にする)。 */
-export const MAX_SYNC_ROWS = 5000
+/** import の1バッチ行数(画面のダウンロードループ。API 側で 1〜IMPORT_PAGE_MAX に補正)。 */
+export const IMPORT_PAGE_SIZE = 100
+export const IMPORT_PAGE_MAX = 200
+
+export function clampImportLimit(raw: unknown): number {
+  const n = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : Number.NaN
+  if (!Number.isInteger(n)) return IMPORT_PAGE_SIZE
+  return Math.min(IMPORT_PAGE_MAX, Math.max(1, n))
+}
 
 export function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = []
@@ -291,48 +358,74 @@ export function chunk<T>(items: T[], size: number): T[][] {
   return out
 }
 
-/** /api/sync-config の応答(設定の取得・保存で同じ形を返す)。 */
-export interface SyncConfigResponse {
-  settings: SyncSettings
-  /** サービスアカウント鍵がサーバー側に設定されているか(未設定なら同期実行不可) */
+/**
+ * import の分页カーソル。**取り込み対象行の offset**(文字列)がカーソル。
+ * code カーソルと違い、シート側の並び(数値昇順とは限らない)をそのまま保つ。末尾が limit 未満なら null。
+ */
+export function importNextCursor(rows: SyncRow[], offset: number, limit: number): string | null {
+  if (rows.length < limit) return null
+  return String(offset + rows.length)
+}
+
+/** /api/sync-config の応答(データセット一覧の取得・保存で同じ形を返す)。 */
+export interface SourceConfigResponse {
+  sources: SyncSource[]
+  /** サービスアカウント鍵がサーバー側に設定されているか(未設定なら取り込み・書き込み不可) */
   serviceAccountConfigured: boolean
   updatedBy: string | null
   updatedAt: string | null
-  /** DB の設定行が無い(マイグレーション未適用 or 初回)。UI は既定値をそのまま表示する */
+  /** DB のソース行が 0(0007 未適用 or 初回)。UI は既定値をそのまま表示する */
   rowMissing: boolean
 }
 
-/** /api/sync-preview の応答(確定前に見せる要約)。 */
-export interface SyncPreviewResponse {
-  sheetTitle: string
-  /** シートに存在したワークシート名(設定の worksheet が不一致だったときの案内用) */
-  sheetTitles: string[]
-  /** 設定の worksheet が実際のシート名と一致したか(不一致は最初のシートにフォールバック) */
+/** /api/source-preview の応答(取り込み前にシート実測を見せる。書き込まない。読み取り失敗は ok:false)。 */
+export interface SourcePreviewResponse {
+  sourceId: number
+  /** シート読み取りが成功したか(false なら error に理由。API は落ちない) */
+  ok: boolean
+  error: string | null
+  sheetTitle: string | null
+  /** 設定の worksheet がシート一覧にあったか(不一致は最初のシートにフォールバック) */
   worksheetMatched: boolean
-  headerCount: number
-  /** ヘッダー名の一覧(選別判定の材料として UI に出す) */
-  headers: string[]
+  /** シートに存在したワークシート名(不一致のときの案内用) */
+  sheetTitles: string[]
+  headers: string[] | null
   /** 取り込み対象カラム(選別後) */
   columns: string[]
   /** payload に載るキー名(rename 適用後) */
   payloadKeys: string[]
+  /** シートのデータ行数(ヘッダーを除く。上限前の実測) */
   dataRows: number
+  /** 取り込み対象行数 */
+  rowCount: number
   /** code が空でスキップされた行数 */
   skipped: number
   /** 行フィルタ(filterColumn/filterValues)で除外した行数 */
   filtered: number
-  /** prune(削除)が設定で有効か */
-  pruneEnabled: boolean
-  /** 確定時に削除される予定の items 行数(シートに無い code。pruneEnabled のときのみ計算) */
-  deleteCount: number
-  /** 既に code が存在する行数(update 対象) */
-  updateCount: number
-  /** 新規 code の行数(insert 対象) */
-  insertCount: number
+  codeColumnMissing: boolean
+  filterColumnMissing: boolean
+  /** MAX_IMPORT_ROWS 超で切り捨てられたか(import は打ち切る) */
+  truncated: boolean
   /** 先頭サンプル(プレビュー表示用) */
   sample: SyncRow[]
-  /** MAX_SYNC_ROWS を超えて切り捨てられたか */
+}
+
+/** /api/import の応答(1バッチ。画面は cursor が null になるまで繰り返す)。 */
+export interface ImportPageResponse {
+  sourceId: number
+  sheetTitle: string
+  headers: string[]
+  columns: string[]
+  /** 取り込み対象の総行数(上限打ち切り後の値) */
+  total: number
+  rows: SyncRow[]
+  /** 次のページカーソル(offset の文字列)。最終ページは null */
+  nextCursor: string | null
+  skipped: number
+  filtered: number
   truncated: boolean
+  /** この取り込みの基準日時(ISO。シート索引のキャッシュと同じ読み取りを指す) */
+  importedAt: string
 }
 
 /** セット番号 → A1 の列表記(0基点: 0='A', 25='Z', 26='AA')。 */
@@ -360,16 +453,9 @@ export function a1Cell(title: string, colIndex: number, rowNumber: number): stri
   return `${quoteSheetTitle(title)}!${columnLetter(colIndex)}${rowNumber}`
 }
 
-/** /api/sync-commit の応答。 */
-export interface SyncCommitResponse {
-  sheetTitle: string
-  targetTable: string
-  upserted: number
-  insertCount: number
-  updateCount: number
-  skipped: number
-  /** 行フィルタ(filterColumn/filterValues)で除外した行数 */
-  filtered: number
-  /** prune(設定有効時)で実際に削除した items 行数 */
-  deleted: number
+/** プレビューに出す payload キー名(rename 適用後の集合)。 */
+export function payloadKeysOf(rows: SyncRow[]): string[] {
+  const keys = new Set<string>()
+  for (const row of rows) for (const k of Object.keys(row.payload)) keys.add(k)
+  return [...keys].sort()
 }

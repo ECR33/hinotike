@@ -1,12 +1,14 @@
 /**
- * items テーブル(code + payload jsonb)の一覧表示・検索の共通ロジック。
+ * code + payload の1行(シート由来)の一覧表示・検索の共通ロジック。
  *
- * payload のキー名は同期側の設定(public.sync_settings の include_columns / rename。
- * 初期シードは shared/utils/sync.ts の DEFAULT_SYNC_SETTINGS)と一致させること。
+ * payload のキー名は**取り込み定義**(public.sync_sources の include_columns / rename。
+ * 既定のシードは shared/utils/sync.ts の DEFAULT_SOURCE と migrations/0007 の行)と一致させること。
  * キー名を変えたい場合はこの定数だけ直せば一覧行・検索が追随し、取り込み側は
- * /sync の設定画面(sync_settings の行)で同じキーに合わせる。
- * 商品(個数系キー)の表示順は productOrderKeys で、同期設定の includeColumns の並びが正
+ * /sync のデータセット設定で同じキーに合わせる。
+ * 商品(個数系キー)の表示順は productOrderKeys で、データセットの includeColumns の並びが正
  * (/sync の「取り込みカラム」の行順をアプリから調整できる)。
+ * 行の正は Google スプレッドシート(Supabase の items テーブルは使わない)。照合は
+ * server(/api/items-* = シート読み取り)と画面(shared/utils/offline.ts = 端末ミラー)で同じ実装を使う。
  * Nuxt 依存の import は置かない(server / shared どちらでも読めるように)。
  */
 
@@ -48,32 +50,31 @@ export function normalizeRemarkState(raw: unknown): RemarkState {
 }
 
 /**
- * 「任意の payload キーがなし」を PostgREST の論理木にする(supabase-js の `.or()` が `or=(...)` に包む)。
- * キーが無い行(null)と空文字の行の両方を「なし」に含める。
- * 空白のみの値は PostgREST で trim できないため「あり」側に残る(同期は空値を載せず、備考の保存は trim するので通常起きない)。
+ * 「任意の payload キーがなし」の意味(ローカル・サーバーどちらの照合もこの規則で読む)。
+ * キーが無い行(null・undefined)と空文字の行の両方を「なし」に含める。
+ * 空白のみの値は trim できないため「あり」側に残る(取り込みは空値を載せず、備考の保存は trim するので通常起きない)。
  */
-export function keyAbsentConditions(key: string): string {
-  const column = payloadTextColumn(key)
-  return `${column}.is.null,${column}.eq.""`
+export function keyAbsent(payloadText: string): boolean {
+  return payloadText === ''
 }
 
-/** 備考の「なし」条件(keyAbsentConditions の備考キー既定版)。 */
-export function remarkAbsentConditions(key = ITEM_REMARK_KEY): string {
-  return keyAbsentConditions(key)
+/** 備考の「なし」判定(keyAbsent の備考キー既定版)。 */
+export function remarkAbsent(payloadText: string, _key = ITEM_REMARK_KEY): boolean {
+  return keyAbsent(payloadText)
 }
 
 /**
  * 汎用の項目(payload キー)絞り込み。
  *
- * 備考と同じ照会(`payload->>"キー"`)を任意キーに流用する:
- *  - present = 値が入っている行(not.is.null + neq "")
- *  - absent  = 欠落・null・空文字の行(keyAbsentConditions → 別の `or=`。複数の `or=` は AND で結合されるので
- *    pairs の OR や他の absent 条件と同時に使える)
- *  - contains = そのキーの部分一致(ilike, containsPattern で % _ をリテラル化)
- *  - in       = 値の複数選択(同一キー内 OR。items-facets と同じ `in.()` + quoteInValue)
+ * 備考と同じ照合(`payload[key]` の文字列値)を任意キーに流用する:
+ *  - present = 値が入っている行(空でない)
+ *  - absent  = 欠落・null・空文字の行
+ *  - contains = そのキーの部分一致(大文字小文字無視)
+ *  - in       = 値の複数選択(同一キー内 OR)
  * キー同士・備考・code・氏名・年・組との指定はすべて AND。
- * キー名は同期設定(includeColumns + rename)やシートヘッダー由来の任意文字列なので、
- * 静的定数ではなく API/画面が実際に発見したキーから選ぶ(有無の絞り込みは同期前にunknownキーでも送れる)。
+ * 照合の実装は `shared/utils/offline.ts` の `offlineItemsQuery`(server のシート由来行にも端末ミラーにも同じ関数)。
+ * キー名は取り込み定義(includeColumns + rename)やシートヘッダー由来の任意文字列なので、
+ * 静的定数ではなく API/画面が実際に発見したキーから選ぶ。
  */
 export type KeyFilterMode = 'present' | 'absent' | 'contains' | 'in'
 

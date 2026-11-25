@@ -8,6 +8,12 @@ export interface MeState {
   authenticated: boolean
   authorized: boolean
   email: string | null
+  /**
+   * `auth.uid()` の UUID。端末内のミラー(IndexedDB)は「取り込んだ利用者」のデータなので、
+   * ミラーメタに写した uid とこの uid の一致判定で別ユーザのローカル作業を無効にする
+   * (`shared/utils/offline.ts` の `mirrorBelongsToUser`)。未認証は null。
+   */
+  uid: string | null
 }
 
 /**

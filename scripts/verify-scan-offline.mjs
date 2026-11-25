@@ -1,16 +1,18 @@
-// `/scan` のオフラインモードを実測する検証(dev サーバ + ローカル Supabase 前提)。
-// 流れ: 準備(通信あり)→ チェックインをオフライン(context.setOffline)で確認→記録 → IndexedDB の
-// キューに積む → 画面を閉じて reload しても復旧確定Bannerが残る( persistence 検証)→
-// VERIFY_OFFLINE_FLUSH=1 のとき復旧確定(/api/scan-offline-flush でシートへ書き込み、証跡にオフライン時刻)。
+// `/scan` の**データセットの取り込みとローカル作業**を実測する検証(dev サーバ + ローカル Supabase 前提)。
+// 流れ: 取り込み(通信あり)→ チェックインをローカル作業(context.setOffline)で確認→記録 → IndexedDB の
+// キューに積む → 画面を閉じて reload しても「ためた記録を確定」Banner が残る(persistence 検証)→
+// VERIFY_OFFLINE_FLUSH=1 のとき確定(/api/scan-offline-flush でシートへ書き込み、証跡に端末での読み取り時刻)。
+// ゲート未指定の末尾では「端末のデータを完全に削除」を実測する(items/snapshot/localStorage のメタ・
+// 選択/ページキャッシュが消え、ためた記録は氏名だけ除去されて code が残る)→「ためた記録をすべて捨てる」で queue 0。
 //
 //   node scripts/verify-scan-offline.mjs [baseUrl]
 //
-// 注意: 復旧確定は **dev シートに 来場済/来場日時 を書く**(verify-scan-confirm と同じ制約)。
+// 注意: 確定は **dev シートに 来場済/来場日時 を書く**(verify-scan-confirm と同じ制約)。
 // デフォルトでは確定せず、待機キューを IndexedDB から掃除して終わる。
 //
-// オフラインでのページ起動(SW の HTML cache)とオフライン SPA 遷移(/scan→/result のローカル照会)は
+// ローカルでのページ起動(SW の HTML cache)とローカル SPA 遷移(/scan→/result のローカル照会)は
 // dev では SW が登録されないためここでは検証しない(本番 build の SW で動く。このスクリプトは
-// setOffline 下でも「スナップショットが有効なら通信を使わない記録」が動くことを検証する)。
+// setOffline 下でも「取り込み済みなら通信を使わない記録」が動くことを検証する)。
 import { chromium } from 'playwright-core'
 import pkg from '@zxing/library'
 
@@ -100,26 +102,26 @@ try {
     db.close()
   }).catch(() => {})
 
-  // 実在する code と氏名を items から選ぶ(ハードコードせず dev データに追随する)。
-  // 来場済=済 の行は dedupe で復旧確定がスキップになるので、未記録の行を選ぶ(実行を反復できる)。
+  // 実在する code と氏名を**作業中のデータセット**から選ぶ(ハードコードせず dev データに追随する)。
+  // 来場済=済 の行は dedupe で確定がスキップになるので、未記録の行を選ぶ(実行を反復できる)。
   const picked = await page.evaluate(async () => {
     const j = await (await fetch('/api/items-list?limit=100')).json()
     const row = (j.rows ?? []).find((r) => r.payload?.['来場済'] !== '済')
-    return row ? { code: String(row.code), name: row.payload?.['氏名'] ?? null } : null
+    return row ? { code: String(row.code), name: row.payload?.['氏名'] ?? null, sourceId: j.sourceId ?? null } : null
   })
   if (!picked?.code) {
-    failures.push('items にコードが無い(dev Supabase の同期 / /sync が必要)')
+    failures.push('データセットにコードが無い(/sync でスプレッドシートを定義し、シートに data があること)')
   } else {
     const CODE = picked.code
     const NAME = picked.name ?? CODE
 
-    // ── オフライン準備(通信あり)── オフライン欄は管理欄(details)の中なので開いてから押す
+    // ── データの取り込み(通信あり)── データセット欄は管理欄(details)の中なので開いてから押す
     await page.locator('.admin-card > summary').click()
-    await page.getByRole('button', { name: 'オフラインモード準備' }).click()
+    await page.getByRole('button', { name: 'このデータを端末に取り込む' }).click()
     await page
-      .waitForFunction(() => document.body.textContent?.includes('オフライン準備完了'), undefined, { timeout: 60000 })
-      .catch(() => failures.push('オフライン準備完了の注記が出ない'))
-    console.log(`準備: ${(await page.textContent('body').catch(() => '')).match(/オフライン準備完了\([^)]*\)/)?.[0] ?? ''}`)
+      .waitForFunction(() => document.body.textContent?.includes('取り込み完了'), undefined, { timeout: 60000 })
+      .catch(() => failures.push('取り込み完了の注記が出ない'))
+    console.log(`取り込み: ${(await page.textContent('body').catch(() => '')).match(/取り込み完了:[^。]*/)?.[0] ?? ''}`)
 
     // ── チェックインモード(確認モード)を選択 → 通信を切ってスキャン ──
     await page.getByRole('button', { name: 'チェックイン' }).click()
@@ -139,9 +141,9 @@ try {
       await page.waitForFunction((n) => document.querySelector('.pending-card')?.textContent?.includes(n), NAME, { timeout: 12000 }).catch(() => {})
       pendingShown = await page.textContent('.pending-card').catch(() => '').then((t) => t.includes(NAME))
     }
-    if (!pendingShown) failures.push('オフライン確認カードに氏名が現れない(ローカルスナップショット照合が動いていない)')
+    if (!pendingShown) failures.push('ローカル作業の確認カードに氏名が現れない(端末ミラーの照合が動いていない)')
     const pending = await page.textContent('.pending-card').catch(() => '')
-    console.log(`オフライン確認カード: ${pending.replace(/\s+/g, ' ').slice(0, 160)}`)
+    console.log(`ローカル確認カード: ${pending.replace(/\s+/g, ' ').slice(0, 160)}`)
 
     // 「記録」は busy の間 disabledになる(disabled は hit-test されない)ので、有効化されてから
     // hit を測る(押せる状態の実測)。待機がタイムアウトした場合は下の断言で失敗になる。
@@ -172,66 +174,82 @@ try {
         hitClass: hit?.className ?? null,
       }
     })
-    console.log(`オフライン確認カードの収まり: ${JSON.stringify(fit)}`)
-    if (!fit.insideCamera) failures.push('オフライン確認カードがカメラ枠の内側に出ていない(縦を積んでいる)')
-    if (!fit.aboveNav) failures.push('オフライン確認カードが bottom-nav に隠れる(スクロールが必要)')
-    if (!fit.recordHit) failures.push('オフライン確認カードの「記録」ボタンが別の要素に押されている')
-    if (!fit.btnInViewport) failures.push('オフライン確認カードの「記録」が画面内に見えない(スクロールが必要)')
+    console.log(`ローカル確認カードの収まり: ${JSON.stringify(fit)}`)
+    if (!fit.insideCamera) failures.push('確認カードがカメラ枠の内側に出ていない(縦を積んでいる)')
+    if (!fit.aboveNav) failures.push('確認カードが bottom-nav に隠れる(スクロールが必要)')
+    if (!fit.recordHit) failures.push('確認カードの「記録」ボタンが別の要素に押されている')
+    if (!fit.btnInViewport) failures.push('確認カードの「記録」が画面内に見えない(スクロールが必要)')
 
-    // 記録 → ローカルキュー(IDB)に積む(通信しない)
+    // 記録 → 端末のキュー(IDB)に積む(通信しない)
     await page.getByRole('button', { name: /^記録$/ }).click()
     await page
-      .waitForFunction(() => document.body.textContent?.includes('ローカルに記録'), undefined, { timeout: 10000 })
+      .waitForFunction(() => document.body.textContent?.includes('端末に記録しました'), undefined, { timeout: 10000 })
       .catch(() => failures.push('ローカル記録の注記が出ない'))
     await page
-      .waitForFunction((c) => document.body.textContent?.includes(`オフラインの記録 ${c}件`), 1, { timeout: 10000 })
-      .catch(() => failures.push('復旧確定Banner(オフラインの記録 1件)が出ない'))
+      .waitForFunction((c) => document.body.textContent?.includes(`ためた記録 ${c}件`), 1, { timeout: 10000 })
+      .catch(() => failures.push('確定Banner(この端末にためた記録 1件)が出ない'))
     if (!(await page.textContent('body').catch(() => '')).includes('未確定(ローカル)')) failures.push('セッション欄が未確定(ローカル)表示にならない')
-    console.log('オフライン記録: 確認カード→記録→ローカルキュー 1件 OK')
+    console.log('ローカル記録: 確認カード→記録→端末キュー 1件 OK')
 
     // ── persistence: reload(通信あり)してもキューが残る ──
     await page.context().setOffline(false)
     await page.goto(`${base}/scan`, { waitUntil: 'networkidle' })
     await page
-      .waitForFunction((c) => document.body.textContent?.includes(`オフラインの記録 ${c}件`), 1, { timeout: 10000 })
-      .catch(() => failures.push('reload 後に復旧確定Bannerが消えた(IndexedDB の persistence が壊れている)'))
-    console.log('reload 後も オフラインの記録 1件 が残る(IndexedDB persistence OK)')
+      .waitForFunction((c) => document.body.textContent?.includes(`ためた記録 ${c}件`), 1, { timeout: 10000 })
+      .catch(() => failures.push('reload 後に確定Bannerが消えた(IndexedDB の persistence が壊れている)'))
+    console.log('reload 後も ためた記録 1件 が残る(IndexedDB persistence OK)')
 
-    // ── オフライン items 一覧(/scan のスナップショットからローカルで絞り込み・分页)──
+    // ── ローカル items 一覧(取り込み済みデータからローカルで絞り込み・分页)──
     await page.goto(`${base}/items`, { waitUntil: 'networkidle' })
     await page
-      .waitForFunction(() => document.body.textContent?.includes('オフラインのスナップショット'), undefined, { timeout: 10000 })
-      .catch(() => failures.push('/items のオフライン注記が出ない(スナップショット一覧が動いていない)'))
-    console.log(`/items 注記: ${(await page.textContent('body').catch(() => '')).match(/オフラインのスナップショット\([^)]*\)/)?.[0] ?? ''}`)
+      .waitForFunction(() => document.body.textContent?.includes('この端末のデータ'), undefined, { timeout: 10000 })
+      .catch(() => failures.push('/items のローカル注記が出ない(端末ミラーの一覧が動いていない)'))
+    console.log(`/items 注記: ${(await page.textContent('body').catch(() => '')).match(/この端末のデータ\([^)]*\)/)?.[0] ?? ''}`)
     await page
       .waitForFunction(() => document.querySelectorAll('.item-list li').length > 0, undefined, { timeout: 10000 })
-      .catch(() => failures.push('/items のスナップショット一覧が空(IDB から1ページ目が出ていない)'))
-    // 氏名で絞り込む(デバウンス後にスナップショットからローカル照合。通信しない)
+      .catch(() => failures.push('/items の端末一覧が空(IDB から1ページ目が出ていない)'))
+    // 氏名で絞り込む(デバウンス後に端末ミラーからローカル照合。通信しない)
     await page.getByLabel('氏名(部分一致)').fill(NAME)
     await page
       .waitForFunction((n) => document.querySelectorAll('.item-list li').length === 1 && document.body.textContent?.includes(n), NAME, { timeout: 10000 })
-      .catch(() => failures.push('/items の氏名絞り込みがスナップショットから効かない'))
+      .catch(() => failures.push('/items の氏名絞り込みが端末データから効かない'))
     console.log(`/items 氏名絞り込み: ${NAME} → ${(await page.textContent('.status').catch(() => '')).replace(/\s+/g, ' ').trim()} / ${await page.evaluate(() => document.querySelector('.item-list li')?.textContent?.slice(0, 40) ?? '')}`)
 
-    // 年・組の欄を開いて、選択肢がスナップショットから生成されていることを確認する(chip が出る=facetError でない)
+    // 年・組の欄を開いて、選択肢が端末データから生成されていることを確認する(chip が出る=facetError でない)
     await page.getByRole('button', { name: /年・組の絞り込み/ }).click().catch(() => {})
     await page
       .waitForFunction(() => document.querySelectorAll('.facet .chip').length > 0 && !document.querySelector('.facet .chips')?.textContent?.includes('読み込み中'), undefined, { timeout: 5000 })
-      .catch(() => failures.push('/items の年・組の chip がスナップショットから出ない(facet 導出が壊れている)'))
+      .catch(() => failures.push('/items の年・組の chip が端末データから出ない(facet 導出が壊れている)'))
     console.log(`/items facet chips: ${await page.evaluate(() => document.querySelectorAll('.facet .chip').length)}個`)
 
-    // ── 復旧確定(ゲート: dev シートへ 来場済/来場日時 を書く)──
+    // ── ミラーの uid 紐づけ(取り込みした利用者の uid がメタに載る=別ユーザのローカル作業の根)──
+    const metaUid = await page.evaluate(() => {
+      const raw = localStorage.getItem('hinotike-offline-meta')
+      if (!raw) return null
+      try {
+        return JSON.parse(raw)?.uid ?? null
+      } catch {
+        return null
+      }
+    })
+    if (typeof metaUid !== 'string' || metaUid === '') {
+      failures.push('取り込みメタに uid が載らない(別ユーザが読めるミラーになる = parseOfflineMeta が無効扱いにする)')
+    } else {
+      console.log(`ミラーの uid: ${metaUid}`)
+    }
+
+    // ── ためた記録の確定(ゲート: dev シートへ 来場済/来場日時 を書く)──
     if (process.env.VERIFY_OFFLINE_FLUSH === '1') {
       await page.goto(`${base}/scan`, { waitUntil: 'networkidle' })
-      await page.getByRole('button', { name: /^オフラインの記録を確定/ }).click()
+      await page.getByRole('button', { name: /^ためた記録を確定/ }).click()
       await page
-        .waitForFunction(() => document.body.textContent?.includes('復旧確定'), undefined, { timeout: 20000 })
-        .catch(() => failures.push('復旧確定の注記が出ない'))
-      const note = (await page.textContent('body').catch(() => '')).match(/復旧確定:.*/)?.[0] ?? ''
-      console.log(`復旧確定: ${note.replace(/\s+/g, ' ').slice(0, 180)}`)
-      if (!note.includes('1件をシートに書き込みました')) failures.push('復旧確定で 1件が書き込まれない')
+        .waitForFunction(() => document.body.textContent?.includes('確定:'), undefined, { timeout: 20000 })
+        .catch(() => failures.push('確定の注記が出ない'))
+      const note = (await page.textContent('body').catch(() => '')).match(/確定:.*/)?.[0] ?? ''
+      console.log(`確定: ${note.replace(/\s+/g, ' ').slice(0, 180)}`)
+      if (!note.includes('1件をシートに書き込みました')) failures.push('確定で 1件が書き込まれない')
 
-      // 記録後の状態を API で読む(シート→payload の往復がオフライン時の日時で載る)
+      // 記録後の状態を API で読む(シート値の往復が端末での読み取り日時で載る)
       const check = await page.evaluate(async (code) => {
         const cfg = await (await fetch('/api/scan-config')).json()
         const modeId = cfg.modes.find((m) => m.name === 'チェックイン')?.id
@@ -247,14 +265,22 @@ try {
       if (check.state !== '済') failures.push('復旧確定後の状態が済にならない')
       if (!check.recordedAt) failures.push('復旧後の記録日時が載らない')
 
-      // 証跡 scan_events(/records)にオフライン時刻(off-line の at)がそのまま残る
+      // 証跡 scan_events(/records)に端末での読み取り時刻(at)がそのまま残る
       await page.goto(`${base}/records`, { waitUntil: 'networkidle' })
       const history = await page.textContent('body').catch(() => '')
       if (!history.includes(CODE)) failures.push(`/records に ${CODE} の証跡がない`)
       console.log(`/records: ${CODE} の証跡 ${history.includes(CODE) ? 'あり' : 'なし'}`)
     } else {
-      // ゲート未指定: シートを書かず、待機キューだけ掃除して元の状態に戻す
-      await page.evaluate(async () => {
+      // ゲート未指定: シートを書かず、**端末のデータを完全に削除**して状態を戻す(削除の検証も兼ねる)。
+      // 削除はミラー(items/snapshot)+localStorage のメタ/選択+ページキャッシュを消し、
+      // ためた記録は氏名だけ除去して code/modeId/at を残す(確定能力は失わない)。
+      await page.goto(`${base}/scan`, { waitUntil: 'networkidle' })
+      await page.getByRole('button', { name: /管理 — 端末内のデータ/ }).click().catch(() => {})
+      await page.getByRole('button', { name: '端末のデータを完全に削除' }).click()
+      await page
+        .waitForFunction(() => document.body.textContent?.includes('この端末のデータを削除しました'), undefined, { timeout: 10000 })
+        .catch(() => failures.push('端末データの削除の注記が出ない'))
+      const purged = await page.evaluate(async () => {
         const db = await new Promise((resolve, reject) => {
           const req = indexedDB.open('hinotike-offline', 1)
           req.onupgradeneeded = () => {
@@ -265,15 +291,72 @@ try {
           req.onsuccess = () => resolve(req.result)
           req.onerror = () => reject(req.error)
         })
-        await new Promise((resolve, reject) => {
-          const tx = db.transaction('queue', 'readwrite')
-          tx.objectStore('queue').clear()
-          tx.oncomplete = () => resolve()
-          tx.onerror = () => reject(tx.error)
+        const counts = {}
+        for (const store of ['items', 'snapshot', 'queue']) {
+          counts[store] = await new Promise((resolve, reject) => {
+            const tx = db.transaction(store, 'readonly')
+            const req = tx.objectStore(store).count()
+            req.onsuccess = () => resolve(req.result)
+            req.onerror = () => reject(req.error)
+          })
+        }
+        const named = await new Promise((resolve, reject) => {
+          const tx = db.transaction('queue', 'readonly')
+          const req = tx.objectStore('queue').getAll()
+          req.onsuccess = () => resolve((req.result ?? []).filter((e) => e && typeof e.name === 'string' && e.name !== '').length)
+          req.onerror = () => reject(req.error)
         })
         db.close()
-      }).catch((e) => console.log(`cleanup failed: ${e instanceof Error ? e.message : String(e)}`))
-      console.log('VERIFY_OFFLINE_FLUSH=1 を付けると復旧確定(シート書き込み+証跡)まで検証します(待機キューは掃除済み)')
+        const cacheLeft = typeof caches === 'undefined' ? false : await caches.has('hinotike-pages')
+        return {
+          items: counts.items,
+          snapshot: counts.snapshot,
+          queue: counts.queue,
+          named,
+          metaLeft: localStorage.getItem('hinotike-offline-meta'),
+          activeSourceLeft: localStorage.getItem('hinotike-active-source'),
+          cacheLeft,
+        }
+      }).catch((e) => ({ error: e instanceof Error ? e.message : String(e) }))
+      if (purged.error) {
+        failures.push(`削除後のストレージが読めない: ${purged.error}`)
+      } else {
+        console.log(`削除後: items=${purged.items} snapshot=${purged.snapshot} queue=${purged.queue}(氏名入り ${purged.named}) meta=${purged.metaLeft ? '残り' : 'なし'} activeSource=${purged.activeSourceLeft ? '残り' : 'なし'} cache=${purged.cacheLeft ? '残り' : 'なし'}`)
+        if (purged.items !== 0) failures.push('削除後も items ミラーが残っている(氏名が端末に残る)')
+        if (purged.snapshot !== 0) failures.push('削除後も snapshot が残っている')
+        if (purged.metaLeft) failures.push('削除後も localStorage のメタが残っている(ローカル作業が復元される)')
+        if (purged.activeSourceLeft) failures.push('削除後も「作業中のデータセット」の選択が残っている')
+        if (purged.named !== 0) failures.push(`削除後もためた記録に氏名が残っている(${purged.named}件)`)
+        if (purged.cacheLeft) failures.push('削除後もページキャッシュ(hinotike-pages)が残っている(缓存 HTML に氏名・email が載る)')
+        if (purged.queue !== 1) failures.push(`削除でためた記録が消えた(${purged.queue}件 = 記録そのものは残す設計)`)
+      }
+
+      // ためた記録をすべて捨てる(2段階確認: 1回目で案内、2回目で実行)
+      await page.getByRole('button', { name: /ためた記録をすべて捨てる/ }).click().catch(() => {})
+      await page.getByRole('button', { name: /本当に捨てる/ }).click().catch(() => {})
+      await page
+        .waitForFunction(() => !document.body.textContent?.includes('この端末にためた記録'), undefined, { timeout: 10000 })
+        .catch(() => failures.push('ためた記録を捨てても Banner が消えない(queue が消されていない)'))
+      const queueLeft = await page.evaluate(async () => {
+        const db = await new Promise((resolve, reject) => {
+          const req = indexedDB.open('hinotike-offline', 1)
+          req.onupgradeneeded = () => {
+            if (!req.result.objectStoreNames.contains('queue')) req.result.createObjectStore('queue')
+          }
+          req.onsuccess = () => resolve(req.result)
+          req.onerror = () => reject(req.error)
+        })
+        const n = await new Promise((resolve, reject) => {
+          const tx = db.transaction('queue', 'readonly')
+          const req = tx.objectStore('queue').count()
+          req.onsuccess = () => resolve(req.result)
+          req.onerror = () => reject(req.error)
+        })
+        db.close()
+        return n
+      }).catch(() => -1)
+      if (queueLeft !== 0) failures.push(`ためた記録を捨てても queue に残る(${queueLeft}件)`)
+      console.log('端末データの完全削除(items/snapshot/meta/cache)+ためた記録の氏名除去+捨てるときの queue 掃除 OK')
     }
   }
 } catch (e) {
@@ -285,7 +368,7 @@ if (failures.length) {
   console.log(`画面=${(await page.textContent('body').catch(() => '')).slice(0, 200)}`)
 }
 const verdict = failures.length === 0
-  ? `OK(準備→オフライン確認→ローカル記録→persistence→itemsスナップショット一覧${process.env.VERIFY_OFFLINE_FLUSH === '1' ? '→復旧確定→証跡' : ''})`
+  ? `OK(取り込み→ローカル確認→端末記録→persistence→items端末一覧${process.env.VERIFY_OFFLINE_FLUSH === '1' ? '→確定→証跡' : ''})`
   : 'FAIL'
 console.log(`verdict: ${verdict}`)
 await browser.close()

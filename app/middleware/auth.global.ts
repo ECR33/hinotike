@@ -32,10 +32,17 @@ export default defineNuxtRouteMiddleware(async (to) => {
       // オフラインモード中は通信を試みない。準備はログイン済み・登録済み状态下でしか
       // items-list が403にならずに成功できないので、localStorage のメタが「昔認証できた」ことの根拠になる
       // ( cached HTML の auth-state がある場合は上の $fetch 自体走らない。保護画面を offline で開いたとき用)。
-      if (import.meta.client && readOfflineMetaFromStorage()?.enabled) {
-        me = { authenticated: true, authorized: true, email: null }
-        authState.value = me
-        return
+      // uid 紐づけ: メタは取り込み時に uid を写しているので、`uid` が有るメタだけが根拠になる
+      // (旧形・uid 欠けのメタは parseOfflineMeta が null にする = ここでも通さない)。
+      // 通信が無い環境では identity を検証できないので、メタの uid を認証状態として引き継ぐ
+      // (端末の信頼が根拠。別ユーザのログイン時は上の $fetch が通るので uid 不一致でローカル作業は使えない)。
+      if (import.meta.client) {
+        const m = readOfflineMetaFromStorage()
+        if (m?.enabled && m.uid) {
+          me = { authenticated: true, authorized: true, email: null, uid: m.uid }
+          authState.value = me
+          return
+        }
       }
       throw e
     }

@@ -1,20 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import {
   clampLimit,
-  containsPattern,
   compareFacetValues,
-  escapeIlikePattern,
   escapePayloadKey,
   facetCounts,
   FACET_MAX_VALUES,
   FACET_VALUE_MAX_LENGTH,
+  ITEM_GROUP_KEY,
   ITEM_PAGE_SIZE,
   ITEM_PAGE_SIZE_MAX,
-  ITEM_GROUP_KEY,
   ITEM_PAIR_MAX,
   ITEM_YEAR_KEY,
   isFilterableKey,
-  keyAbsentConditions,
+  keyAbsent,
   KEY_FILTER_MAX,
   KEY_NAME_MAX_LENGTH,
   nextCursor,
@@ -30,17 +28,17 @@ import {
   payloadTextColumn,
   payloadValue,
   productOrderKeys,
+  quoteInValue,
   sameKeyFilters,
   serializeKeyFilters,
   quantityName,
   isQuantityKey,
   facetPairCounts,
   missingPairCount,
-  quoteInValue,
-  remarkAbsentConditions,
+  remarkAbsent,
   SEARCH_FILTER_MAX_LENGTH,
 } from '../../shared/utils/items'
-import { DEFAULT_SYNC_SETTINGS } from '../../shared/utils/sync'
+import { DEFAULT_SOURCE } from '../../shared/utils/sync'
 
 describe('normalizeFilter(検索入力の正規化)', () => {
   it('前後の空白だけ・空文字・非文字列は条件なし(null)', () => {
@@ -61,31 +59,8 @@ describe('normalizeFilter(検索入力の正規化)', () => {
   })
 })
 
-describe('containsPattern / escapeIlikePattern(PostgREST の ilike)', () => {
-  it('条件なしの入力は null(フィルタを追加しない)', () => {
-    expect(containsPattern('')).toBeNull()
-    expect(containsPattern('  ')).toBeNull()
-  })
-
-  it('部分一致パターンに包む', () => {
-    expect(containsPattern('田中')).toBe('%田中%')
-  })
-
-  it('% と _ と \\ はリテラルに守る(氏名に % が混ざっても任意文字扱いにならない)', () => {
-    expect(escapeIlikePattern('a%b')).toBe('a\\%b')
-    expect(escapeIlikePattern('a_b')).toBe('a\\_b')
-    expect(escapeIlikePattern('a\\b')).toBe('a\\\\b')
-    expect(containsPattern('100%')).toBe('%100\\%%')
-  })
-})
-
-describe('payloadTextColumn / payloadValue(jsonb payload の参照と取り出し)', () => {
-  it('キーを引用した payload ->> キー のカラム参照を作る', () => {
-    expect(payloadTextColumn('氏名')).toBe('payload->>"氏名"')
-    expect(payloadTextColumn('ひのドッグ(個数)')).toBe('payload->>"ひのドッグ(個数)"')
-  })
-
-  it('欠落・null・非文字列を安全に文字列化する', () => {
+describe('payloadValue(payload の値の取り出し)', () => {
+  it('欠落・null・非文字列を安全に文字列化する(照合側は "" を「なし」と読む)', () => {
     const payload = { 学年: '9', クラス: 5, 氏名: null }
     expect(payloadValue(payload, '学年')).toBe('9')
     expect(payloadValue(payload, 'クラス')).toBe('5')
@@ -95,7 +70,7 @@ describe('payloadTextColumn / payloadValue(jsonb payload の参照と取り出�
   })
 })
 
-describe('normalizeRemarkState / remarkAbsentConditions(備考の有無の絞り込み)', () => {
+describe('normalizeRemarkState / keyAbsent(備考・任意キーの有無の絞り込み)', () => {
   it('認識した値はそのまま、それ以外は条件なし(any)', () => {
     expect(normalizeRemarkState('present')).toBe('present')
     expect(normalizeRemarkState('absent')).toBe('absent')
@@ -109,10 +84,13 @@ describe('normalizeRemarkState / remarkAbsentConditions(備考の有無の絞り
     expect(normalizeRemarkState(123)).toBe('any')
   })
 
-  it('「なし」は備考キーの欠落(null)と空文字の両方を包含する論理木にする', () => {
-    expect(remarkAbsentConditions()).toBe('payload->>"備考".is.null,payload->>"備考".eq.""')
-    // キー名を変えられる(同期設定の rename 後も追随できるように引数で渡す)
-    expect(remarkAbsentConditions('メモ')).toBe('payload->>"メモ".is.null,payload->>"メモ".eq.""')
+  it('「なし」は欠落・null・空文字を包含する(payloadValue の "" が absent 側)', () => {
+    expect(keyAbsent('')).toBe(true)
+    expect(keyAbsent(payloadValue({}, 'ボランティア'))).toBe(true)
+    expect(keyAbsent(payloadValue({ ボランティア: null }, 'ボランティア'))).toBe(true)
+    expect(keyAbsent('済')).toBe(false)
+    expect(remarkAbsent('')).toBe(true)
+    expect(remarkAbsent('振込')).toBe(false)
   })
 })
 
@@ -287,8 +265,8 @@ describe('facetPairCounts / missingPairCount(マトリクスのセル)', () => {
 })
 
 describe('productOrderKeys / quantityName / isQuantityKey(商品欄の表示順)', () => {
-  it('既定の同期設定の並び = 商品表示順(ひのドッグ→やきそば→麦茶→サイダー→カルピス→りんご→ゲーム)', () => {
-    expect(productOrderKeys(DEFAULT_SYNC_SETTINGS.includeColumns, DEFAULT_SYNC_SETTINGS.rename)).toEqual([
+  it('既定のデータセットの並び = 商品表示順(ひのドッグ→やきそば→麦茶→サイダー→カルピス→りんご→ゲーム)', () => {
+    expect(productOrderKeys(DEFAULT_SOURCE.includeColumns, DEFAULT_SOURCE.rename)).toEqual([
       'ひのドッグ(個数)',
       'やきそば(個数)',
       '麦茶(個数)',
@@ -343,18 +321,6 @@ describe('escapePayloadKey / payloadTextColumn(キー名に " が混ざっても
     expect(payloadTextColumn('a"b')).toBe('payload->>"a""b"')
     // 通常のキー名は変化しない(既存の照会式と同じ形)
     expect(payloadTextColumn('氏名')).toBe('payload->>"氏名"')
-  })
-})
-
-describe('keyAbsentConditions(任意キーの「なし」論理木)', () => {
-  it('任意のキー名で欠落(null)と空文字の両方を包含する', () => {
-    expect(keyAbsentConditions('ボランティア')).toBe(
-      'payload->>"ボランティア".is.null,payload->>"ボランティア".eq.""',
-    )
-  })
-
-  it('remarkAbsentConditions はキー既定版(備考キー指定と同じ論理木)', () => {
-    expect(remarkAbsentConditions()).toBe(keyAbsentConditions('備考'))
   })
 })
 

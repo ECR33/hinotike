@@ -64,7 +64,7 @@
 - `pages/index.vue:37` の `supabase.auth.signOut()`(ブラウザ側)と `/api/logout`(サーバ cookie 削除)の二重ログアウトは、まさにこの不整合を埋めるための対症療法になっている。
 - 改善: **認可フローはサーバ側 1 系統に寄せる**。
   - ログイン開始も `GET /api/auth/login?returnTo=...` を作り、サーバ側 client で `signInWithOAuth(..., { options: { redirectTo } })` → 得た URL へ `sendRedirect`。`skipBrowserRedirect: true` を使う形に統一。
-  - ログアウトは `/api/logout` のみ(`signOut()` の二重呼び出しを撤去)。ブラウザ client は QR スキャン以外の用途には使わない。
+  - ログアウトは `/api/logout` のみ(`signOut()` の二重呼び出しを撤去)。ブラウザ client は QR スキャン以外の用途には使わない。**ログアウトは同時にこの端末のデータも捨てる**(`app/utils/offlineStore.ts` の `purgeDeviceData()` — IndexedDB のミラー、localStorage のメタとデータセット選択、SW のページキャッシュを消し、ためた記録は氏名だけ除去して code を残す。端末を他人に渡したときに氏名一覧を残さないため)。
 
 ### P0-3 `returnTo` のオープンリダイレクト(相対指定が不十分)
 - `server/api/auth/callback.get.ts:29`, `server/middleware/oauth-root-callback.ts:14`, `pages/index.vue:11` はいずれも `startsWith('/')` のみ。`//evil.example.com` や `/\evil.example.com` が通ってしまい、外部ドメインへリダイレクトし得る(コールバックは外部サイトから飛んでくる経路なので特に悪い)。

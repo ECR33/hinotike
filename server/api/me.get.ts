@@ -8,12 +8,12 @@ import { serverSupabaseClient, serverSupabaseUser } from '#supabase/server'
  */
 export default defineEventHandler(async (event) => {
   if (!isSupabaseConfigured(event)) {
-    return { authenticated: false, authorized: false, email: null }
+    return { authenticated: false, authorized: false, email: null, uid: null }
   }
 
   const user = await serverSupabaseUser(event)
   if (!user) {
-    return { authenticated: false, authorized: false, email: null }
+    return { authenticated: false, authorized: false, email: null, uid: null }
   }
 
   // モジュール 2.x の serverSupabaseUser は JWT クレームを返す(id ではなく sub に UUID が入る)。
@@ -40,5 +40,6 @@ export default defineEventHandler(async (event) => {
     authenticated: true,
     authorized: data != null,
     email: user.email ?? data?.email ?? null,
+    uid,
   }
 })
