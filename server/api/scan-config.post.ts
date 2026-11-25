@@ -33,7 +33,7 @@ export default defineEventHandler(async (event): Promise<ScanConfigResponse> => 
   return {
     modes: saved.modes as ScanMode[],
     sources,
-    serviceAccountConfigured: readServiceAccountKey() !== null,
+    serviceAccountConfigured: (await readServiceAccountKey()) !== null,
     rowMissing: false,
     sourceMissing: Number.isInteger(askedId) && askedId > 0 && target === null,
     sheetTitle: sheet?.title ?? null,

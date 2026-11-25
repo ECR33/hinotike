@@ -7,8 +7,9 @@
   "main": ".output/server/index.mjs",
   "assets": { "binding": "ASSETS", "directory": ".output/public" },
 
-  // nodejs_compat は 2026-08-04 以降なら既定で ON。同期の JWT 署名(node:crypto フォールバック)が
-  // 必要なので date はそれより後ろにし、flag も明示しておく。
+  // nodejs_compat は 2026-08-04 以降なら既定で ON。JWT 署名は Web Crypto を優先するが、
+  // node:crypto にフォールバックする経路(JWT 署名・dev の鍵ファイル読み)が残っているので
+  // date はそれより後ろにし、flag も明示しておく。
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
 

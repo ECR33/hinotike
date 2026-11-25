@@ -24,14 +24,29 @@ export interface ServiceAccountKey {
   private_key: string
 }
 
-/** 環境変数を process.env / Workers の env バinding(globalThis.__env__)の両方から拾う。 */
-export function envValue(name: string): string | undefined {
-  const fromProcess = (globalThis as { process?: { env?: Record<string, string> } }).process?.env?.[name]
-  const fromWorkerEnv = (globalThis as { __env__?: Record<string, string> }).__env__?.[name]
-  for (const v of [fromProcess, fromWorkerEnv]) {
-    if (typeof v === 'string' && v.length > 0) return v
+/**
+ * 環境変数の候補を **Workers の env binding(`globalThis.__env__`) → process.env** の順で並べる。
+ *
+ * 順を逆にした理由: ローカル dev(node)では `.env` / `.env.development` が process.env に同じ名前の
+ * 「パス文字列」を写す(`GOOGLE_SERVICE_ACCOUNT_JSON=./scripts/service-account.json`)。
+ * process.env を先に読むと実鍵 JSON(Workers の secret・`.dev.vars` → `__env__`)を読む前に
+ * そのパスを JSON.parse して失敗し「鍵なし」→ 400 になっていた(dev でシート操作が全部落ちる)。
+ * 両方あるときは「鍵として読めるほう」を使う(`readServiceAccountKey` が候補を順に検証する)。
+ */
+export function envCandidates(name: string): string[] {
+  const out: string[] = []
+  for (const v of [
+    (globalThis as { __env__?: Record<string, string> }).__env__?.[name],
+    (globalThis as { process?: { env?: Record<string, string> } }).process?.env?.[name],
+  ]) {
+    if (typeof v === 'string' && v.length > 0 && !out.includes(v)) out.push(v)
   }
-  return undefined
+  return out
+}
+
+/** 最初の候補を返す(単独の env 値を読む用。鍵の解決は `readServiceAccountKey` が候補を順に検証する)。 */
+export function envValue(name: string): string | undefined {
+  return envCandidates(name)[0]
 }
 
 /**
@@ -46,10 +61,8 @@ export function normalizePrivateKey(pem: string): string {
   return cr
 }
 
-/** 鍵 JSON を検証して返す。未設定/不正なら null(API 側で 400 にする)。 */
-export function readServiceAccountKey(): ServiceAccountKey | null {
-  const raw = envValue('GOOGLE_SERVICE_ACCOUNT_JSON')
-  if (!raw) return null
+/** 鍵 JSON の文字列を検証して返す。不正(またはパス文字列)なら null。 */
+export function parseServiceAccountJson(raw: string): ServiceAccountKey | null {
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
@@ -60,6 +73,46 @@ export function readServiceAccountKey(): ServiceAccountKey | null {
   if (!obj || typeof obj.client_email !== 'string' || !obj.client_email.includes('@')) return null
   if (typeof obj.private_key !== 'string' || !obj.private_key.includes('PRIVATE KEY')) return null
   return { client_email: obj.client_email, private_key: normalizePrivateKey(obj.private_key) }
+}
+
+/**
+ * 鍵ファイル(node の fs から)読む。Workers にはファイルシステムが無いので失敗すれば null。
+ * 相対パスはプロセスの cwd(リポジトリルートで起動する dev / CLI)基準に解決する。
+ */
+async function readKeyFile(pathSpec: string): Promise<ServiceAccountKey | null> {
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const { resolve } = await import('node:path')
+    const raw = await readFile(resolve(process.cwd(), pathSpec), 'utf8')
+    return parseServiceAccountJson(raw)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * サービスアカウント鍵の解決(2系統)。
+ * 1) `GOOGLE_SERVICE_ACCOUNT_JSON` = 鍵 JSON の**文字列**(本番は Worker の secret、dev は `.dev.vars`)。
+ *    候補を順に「鍵として読めるか」見て採用する。process.env にパス文字列が載っていても
+ *    鍵と誤読しない(`npm run dev` は `.env.development` の値を process.env に写す)。
+ * 2) `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` = 鍵ファイルの**パス**(ローカル dev・CLI 用)。
+ *    1 が無いときに fs で読む。本番の Worker はどちらも持たないので null → API が 400 で案内する。
+ */
+export async function readServiceAccountKey(): Promise<ServiceAccountKey | null> {
+  for (const raw of envCandidates('GOOGLE_SERVICE_ACCOUNT_JSON')) {
+    const key = parseServiceAccountJson(raw)
+    if (key) return key
+  }
+  const pathCandidates = [
+    ...envCandidates('GOOGLE_SERVICE_ACCOUNT_JSON_PATH'),
+    // 旧 env(.env の GOOGLE_SERVICE_ACCOUNT_JSON にパスを置いていた形)追随。JSON でない値だけ候補にする。
+    ...envCandidates('GOOGLE_SERVICE_ACCOUNT_JSON').filter((v) => !v.trim().startsWith('{')),
+  ]
+  for (const p of pathCandidates) {
+    const key = await readKeyFile(p)
+    if (key) return key
+  }
+  return null
 }
 
 /** base64url(パディングなし、+/ → -_) */
@@ -95,7 +148,12 @@ export function jwtClaims(sa: ServiceAccountKey, nowMs: number, scope = SHEETS_S
   }
 }
 
-/** RS256 署名。Web Crypto を優先、node:crypto にフォールバック。 */
+/**
+ * RS256 署名。Web Crypto を優先、node:crypto にフォールバック。
+ * `hash` を algorithm に載せる必要がある(workerd は `RSASSA-PKCS1-v1_5` の importKey で
+ * hash 必須: 無いと `Missing field "hash" in "algorithm"` を投げて pkcs8 import が失敗する — 実測)。
+ * hash を載せて Worker 上で Web Crypto が直接動くようにし、node:crypto は fallback のままとする。
+ */
 export async function signRs256(data: string, pem: string): Promise<string> {
   const subtle = globalThis.crypto?.subtle
   if (subtle) {
@@ -105,7 +163,7 @@ export async function signRs256(data: string, pem: string): Promise<string> {
       const key = await subtle.importKey(
         'pkcs8',
         der as unknown as BufferSource,
-        { name: 'RSASSA-PKCS1-v1_5', namedCurve: 'P-256' },
+        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256', namedCurve: 'P-256' },
         false,
         ['sign'],
       )

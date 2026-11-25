@@ -203,7 +203,7 @@ export async function loadSheetIndex(event: H3Event, source: SyncSource): Promis
   const cached = sheetIndexCache.get(key)
   if (cached && Date.now() - cached.fetchedAt < SHEET_INDEX_TTL_MS) return cached
 
-  const sa = readServiceAccountKey()
+  const sa = await readServiceAccountKey()
   if (!sa) {
     throw apiFailure(
       400,
@@ -499,7 +499,7 @@ export async function flushScan(
     eventRows.push({ code, name, status: state === '済' ? 'duplicate' : 'ok', written, range, at: atIso })
   }
 
-  const sa = readServiceAccountKey()
+  const sa = await readServiceAccountKey()
   if (!sa) {
     throw apiFailure(
       400,
@@ -577,7 +577,7 @@ export async function createScanColumns(
     else if (!missing.includes(name)) missing.push(name)
   }
 
-  const sa = readServiceAccountKey()
+  const sa = await readServiceAccountKey()
   if (!sa) {
     throw apiFailure(
       400,

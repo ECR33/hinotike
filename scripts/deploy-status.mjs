@@ -8,9 +8,12 @@
 //   node scripts/deploy-status.mjs        # HEAD が本番に出ているか+本番の健全性
 //   node scripts/deploy-status.mjs --wait # deploy ジョブの完了まで待つ
 //
-// Cloudflare の secret(GOOGLE_SERVICE_ACCOUNT_JSON)や同期設定(spreadsheet_id)は
+// Cloudflare の secret(GOOGLE_SERVICE_ACCOUNT_JSON)やデータセット定義(sync_sources の行)は
 // ダッシュボード側なので、このスクリプトは確認しない(必要なら `npx wrangler login`
 // → `npx wrangler secret list` / `npx wrangler deployments list`)。
+// ただし本番 DB に `public.sync_sources` が**あるか**(マイグレーション 0007/0008 の適用)は
+// 本番の `/api/health` の `configured.datasetTable` で見る — 未適用だとデプロイは成功しても
+// アプリは壊れている(/sync・/scan・/items・/result が 500。docs/datasets.md の 8 節)。
 import { execFileSync } from 'node:child_process'
 
 const WORKFLOW = 'deploy.yml'
@@ -65,8 +68,25 @@ const res = await fetch(PROD_URL).catch((e) => null)
 if (!res) failures.push(`本番の health が取れない(${PROD_URL})`)
 else {
   const body = await res.text().catch(() => '')
-  console.log(`本番 health: ${res.status} ${body.slice(0, 80)}`)
+  console.log(`本番 health: ${res.status} ${body.slice(0, 120)}`)
   if (res.status !== 200) failures.push(`本番 health が ${res.status}`)
+  else {
+    // `configured.datasetTable` = 本番 DB に `public.sync_sources` があるか(マイグレーション 0007/0008)。
+    // 未適用だとコードのデプロイは成功しても `/sync`・`/scan`・`/items`・`/result` が 500 で壊れる
+    // (docs/datasets.md の 8 節)。この判定がないと「deploy succeeded / 画面は不動」を見逃す。
+    let j = null
+    try {
+      j = JSON.parse(body)
+    } catch {
+      failures.push('本番 health の JSON が読めない(deploy-status の datasetTable 判定が使えない)')
+    }
+    if (j && j.configured && j.configured.datasetTable === false) {
+      failures.push(
+        '本番 DB にマイグレーション 0007/0008 が未適用(sync_sources が無い)→ ' +
+          '`npx supabase migration list --remote=<ref>` → `npx supabase db push --remote=<ref> --yes`',
+      )
+    }
+  }
 }
 
 console.log(`verdict: ${failures.length === 0 ? `OK(HEAD ${head.slice(0, 7)} が本番に反映済み)` : `FAIL: ${failures.join(' / ')}`}`)

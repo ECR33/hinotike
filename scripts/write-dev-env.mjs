@@ -8,6 +8,7 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { mergeDevEnv } from './dev-env-merge.mjs'
 
 let status
 try {
@@ -28,15 +29,22 @@ if (!url || !publishable || !secret) {
 }
 
 const file = path.resolve(process.cwd(), '.env.development')
-const lines = [
-  '# ローカル Supabase(supabase start)向けの開発環境ファイル(コミットしない)。',
-  '# `supabase db reset` でキーは変わる。再生成: node scripts/write-dev-env.mjs',
-  `NUXT_PUBLIC_SUPABASE_URL=${url}`,
-  `NUXT_PUBLIC_SUPABASE_KEY=${publishable}`,
-  `SUPABASE_URL=${url}`,
-  `SUPABASE_PUBLISHABLE_KEY=${publishable}`,
-  `SUPABASE_SECRET_KEY=${secret}`,
-  '',
-]
+
+// 既存の .env.development を**置き換えない**(Supabase のキーだけ書き換える)。
+// 丸ごと書くとこのファイルにある別の設定(GOOGLE_SERVICE_ACCOUNT_JSON_PATH / GOOGLE_SPREADSHEET_ID /
+// DEV_ALLOWED_HOSTS / NUXT_PUBLIC_APP_URL)が消え、dev のシート操作が「鍵なし」で落ちる
+// (server/utils/googleSheets.ts は dev では `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` から鍵を読む)。
+const updates = {
+  NUXT_PUBLIC_SUPABASE_URL: url,
+  NUXT_PUBLIC_SUPABASE_KEY: publishable,
+  SUPABASE_URL: url,
+  SUPABASE_PUBLISHABLE_KEY: publishable,
+  SUPABASE_SECRET_KEY: secret,
+}
+
+const existed = fs.existsSync(file)
+const lines = mergeDevEnv(existed ? fs.readFileSync(file, 'utf8') : null, updates)
 fs.writeFileSync(file, lines.join('\n'))
-console.log(`.env.development を書きました: ${file} (${url})`)
+console.log(
+  `${existed ? '.env.development の Supabase キーを更新' : '.env.development を作成'}しました: ${file} (${url})`,
+)

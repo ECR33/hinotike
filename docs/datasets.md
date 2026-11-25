@@ -126,8 +126,29 @@ RLS は旧 `sync_settings` と同じ「登録済みユーザのみ」(`public.is
   `test/unit/scan.test.ts`(モードの `sourceId` とリスト保存)。
 - 統合: `npm run test:local`(ローカル Supabase。`scan-flow.test.ts` はモードのデータセット紐づけと証跡の RLS)。
 - 実測: `node scripts/verify-scan-offline.mjs`(取り込み → 通信を切って確認カード → 端末キュー → persistence →
-  `/items` の端末一覧 → `VERIFY_OFFLINE_FLUSH=1` で確定と証跡)。シート設定と `GOOGLE_SERVICE_ACCOUNT_JSON` が必要。
+  `/items` の端末一覧 → `VERIFY_OFFLINE_FLUSH=1` で確定と証跡)。シート設定とサービスアカウント鍵が必要。
+  鍵の置き場所: 本番は Worker の secret `GOOGLE_SERVICE_ACCOUNT_JSON`(JSON 文字列)、dev は `.dev.vars`(同じ)か
+  `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`(パス → fs から読む)。dev の `.env.development` は**パス側の名前**を使う
+  (旧形: パスを `GOOGLE_SERVICE_ACCOUNT_JSON` に置いていて「鍵 JSON」と誤読され「鍵なし」→ 400 になっていた)。
+  単体: `test/unit/google-credentials.test.ts` / `test/unit/dev-env-merge.test.ts`。
 - 型: `npm run typecheck`。ビルド: `npm run build`(Cloudflare preset)。
+
+## 8. デプロイ時に必要なのは「コード」だけではない(DB 側)
+
+`npx wrangler deploy`(または main への push → GitHub Actions)だけでは**アプリは動かない**:
+本番 Supabase にマイグレーション **0007/0008** が適用されていないと `public.sync_sources` が無く
+`loadSources` が 500(`sync_sources の読み込み失敗: Could not find the table ...`)になり、`/sync`・`/scan`・
+`/items`・`/result`・`/scan-settings` が全部落ちる(実測: 2026-11-25 の本番がこの状態だった)。
+`scan_modes.source_id` / `scan_events.source_id` も 0008 側なので同じ。確認と適用:
+
+```
+npx supabase migration list --remote=<project-ref>     # 0007/0008 が「未適用」に出る
+npx supabase db push --remote=<project-ref> --yes      # 適用(0007 はシード行を作る)
+```
+
+ローカルでも同じ確認ができる(`npm run supabase:start` → `npx supabase migration up` → `npm run test:local`)。
+Workers の secret(`GOOGLE_SERVICE_ACCOUNT_JSON`)はダッシュボード側(`wrangler secret list` で確認)で、
+ CI は secret を送らない(`.github/workflows/deploy.yml` のコメント)。
 
 列追加・定義変更は `invalidateSheetIndexCache` で捨てる(古い行索引で別セルに書かない)。
 `resolveSource`(未指定は有効な最初のデータセット)と `requireSource`(厳密。取り込み・書き込み側)の2系統を使う。

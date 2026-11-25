@@ -181,38 +181,52 @@ QR読み取りを「照会」ではなく「記録」にも使えるようにす
        PKCE verifier はオリジンの cookie にあるため別オリジンでは交換できない → 必ず登録)
    - 利用許可ユーザの email を `users` に事前登録(ダッシュボード or Secret key)。
      **少なくとも1人**は必ずこの経路で登録しておく(QRによる許可運用には許可済みの利用者が必要)
-4. スプレッドシート同期(UI から発動 / `/sync`):
-   - 取り込み設定は DB の `public.sync_settings`(singleton 行 id=1)が正。`/sync` 画面でスプレッドシート ID・
-     ワークシート・code カラム・取り込みカラム(空 = 全カラム)・除外・行フィルタ(有効レコードを表すカラム名 + 許容値のリスト。リスト空 = そのカラムの値が非空なら有効。カラム名空 = フィルタなし)・rename・対象テーブルを編集し、
-     「設定を保存」→「プレビュー」→「取り込みを確定」の順で実行する(確定は `confirm: true` 必須、5000行超は拒否)
-     - 行フィルタで除外された行やシートから消えた行は既定では items に残る(upsert のみ)。「確定時に削除も行う」
-       (`sync_settings.prune_on_commit`、マイグレーション 0005 の items 削除ポリシーが必要)を有効にすると、
-       確定時に「今回のシートで取り込み対象だった code に無い行」を削除する(プレビューに削除予定件数を表示)。
-       誤削除防止のガード: ワークシート名が不一致(フォールバック)のときと取り込み 0 行のときは削除しない
-   - シート読み取りは Worker 側で行う(googleapis 不使用): サービスアカウント鍵から JWT(RS256)を自前署名し
-     oauth2 の jwt-bearer grant で access token を取り、Sheets REST API(v4)を fetch で読む
-   - 備考編集は同じ鍵で `values.update` を叩く(`server/utils/googleSheets.ts` の `updateCellValue`。
-     jwt-bearer の scope を `spreadsheets`(編集)に切り替えて取得する)。読み取りは `spreadsheets.readonly` のまま。
-     サービスアカウントの email を対象スプレッドシートに**編集者以上の権限**で共有していないと書き込みは 403 になる
-   - 鍵は Worker の secret `GOOGLE_SERVICE_ACCOUNT_JSON`(鍵 JSON の文字列)に置く。本番の Worker は
-     Supabase の Secret key を持たない(items の書き込みは RLS の `is_registered_user()` で許可する)
-   - 開発中に Worker で同期を試すなら `.dev.vars` に同じ鍵 JSON を置く(`wrangler dev` は `.dev.vars` を読む。コミットしない)
-   - `.dev.vars` の**値は1行に compact JSON で書く**( dotenv 形式なので Google の鍵ファイルを
-     pretty-print のまま13行で展開すると1行目(`{`)だけ値として読まれ、`server/utils/googleSheets.ts` の
-     `readServiceAccountKey()` の `JSON.parse` が失敗して「鍵なし」→ 400 になる)。生成は:
-     `printf 'GOOGLE_SERVICE_ACCOUNT_JSON=%s\n' "$(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("scripts/service-account.json","utf8")))'))" > .dev.vars`
-     ファイル名は `.dev.vars`(`.dev.vers` は wrangler が見えない上、gitignore の対象外なので鍵がコミットされる)。
-     `npm run dev` も nitro の cloudflare dev plugin が `getPlatformProxy()` を走るため `.dev.vars` を
-     `globalThis.__env__` に写す(起動ログに `Using secrets defined in .dev.vars` が出る)。dev で列作成/
-     書き込みまで検証したいときは env に直接渡す経路も使える — `process.env` は改行を保持するので
-     `GOOGLE_SERVICE_ACCOUNT_JSON="$(cat scripts/service-account.json)" npm run dev` は pretty-print のままで動く
+ 4. データセット(スプレッドシート)の定義(UI から発動 / `/sync`。設計: `docs/datasets.md`):
+    - 取り込み定義は DB の `public.sync_sources`(**複数行**、1行 = 1データセット。マイグレーション 0007/0008)が正。
+      `/sync` 画面でスプレッドシート ID・ワークシート・code カラム・取り込みカラム(空 = 全カラム)・除外・
+      行フィルタ(有効レコードを表すカラム名 + 許容値のリスト。リスト空 = そのカラムの値が非空なら有効。カラム名空 = フィルタなし)・rename を編集し、
+      「保存」→ そのデータセットの「プレビュー」→「このデータを端末に取り込み」の順で実行する
+      (旧 `sync_settings` の singleton 行と items への upsert は撤去した — シートが唯一の正、データ本体は端末の IndexedDB)
+    - シート読み取りは Worker 側で行う(googleapis 不使用): サービスアカウント鍵から JWT(RS256)を自前署名し
+      oauth2 の jwt-bearer grant で access token を取り、Sheets REST API(v4)を fetch で読む
+      (`server/utils/googleSheets.ts`。署名は Web Crypto を優先する — workerd の `crypto.subtle.importKey` は
+      `RSASSA-PKCS1-v1_5` に `hash` が必須で、無いと pkcs8 import が失敗して node:crypto 側へ落ちていた(workerd 実測:
+      `Missing field "hash" in "algorithm"`)。今は `{ name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }` を渡すので
+      Worker 上で Web Crypto が直接動く。node:crypto はフォールバックとして残す)
+    - 備考編集は同じ鍵で `values.update` を叩く(`server/utils/googleSheets.ts` の `updateCellValue`。
+      jwt-bearer の scope を `spreadsheets`(編集)に切り替えて取得する)。読み取りは `spreadsheets.readonly` のまま。
+      サービスアカウントの email を対象スプレッドシートに**編集者以上の権限**で共有していないと書き込みは 403 になる
+    - 鍵は Worker の secret `GOOGLE_SERVICE_ACCOUNT_JSON`(鍵 JSON の文字列)に置く。本番の Worker は
+      Supabase の Secret key を持たない(DB は定義・記録モード・証跡だけ)
+    - **env の名前を2系統に分けた**(旧形の混同が dev の不具合の原因):
+      - `GOOGLE_SERVICE_ACCOUNT_JSON` = 鍵 **JSON の文字列**(本番の secret / `.dev.vars`)
+      - `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` = 鍵ファイルの **パス**(ローカル dev・CLI。`scripts/service-account.json`)
+      `.env` / `.env.development` にパスを `GOOGLE_SERVICE_ACCOUNT_JSON` として置いていた旧形は、`npm run dev` が
+      `.env.development` を process.env に写すため「鍵の文字列」と誤読されて `JSON.parse` が失敗し、
+      `__env__` の実鍵を読む前に「鍵なし」→ シートの読み書きが全部 400 になっていた。
+      現在は `readServiceAccountKey()` が **Workers env(`globalThis.__env__`) → process.env の順に「鍵として読める候補」**
+      を探すので dev は `.dev.vars` の実鍵を使い、JSON が無いときは `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`(または JSON
+      ではない値)を fs から読む(dev/node のみ。Workers にはファイルシステムが無いので失敗すれば null)。
+      env ファイルはパスを `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` に置いた。単体: `test/unit/google-credentials.test.ts`
+    - 開発中に Worker(`wrangler dev`)でシート操作を試すなら `.dev.vars` に同じ鍵 JSON を置く(コミットしない)
+    - `.dev.vars` の**値は1行に compact JSON で書く**( dotenv 形式なので Google の鍵ファイルを
+      pretty-print のまま13行で展開すると1行目(`{`)だけ値として読まれ、`parseServiceAccountJson()` が
+      失敗して「鍵なし」→ 400 になる)。生成は:
+      `printf 'GOOGLE_SERVICE_ACCOUNT_JSON=%s\n' "$(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("scripts/service-account.json","utf8")))'))" > .dev.vars`
+      ファイル名は `.dev.vars`(`.dev.vers` は wrangler が見えない上、gitignore の対象外なので鍵がコミットされる)。
+      `npm run dev` も nitro の cloudflare dev plugin が `getPlatformProxy()` を走るため `.dev.vars` を
+      `globalThis.__env__` に写す(起動ログに `Using secrets defined in .dev.vars` が出る)。
+      `.dev.vars` を置かない dev でも `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`(`.env.development` にある)から鍵を読むので、
+      列作成・書き込みまでそのまま検証できる(旧: 鍵 JSON を env に直接渡す `GOOGLE_SERVICE_ACCOUNT_JSON="$(cat …)" npm run dev` が必要だった)
 
-   - 手動/CLI の同期(ローカル Supabase に本番データを反映するなど): `npm run sync:sheets`(tsx → `scripts/sync-sheets.ts`)。
-     同じ `sync_settings` 行を読み、行が無い/ID が空なら env の `GOOGLE_SPREADSHEET_ID` を使う。
-     鍵は `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`(パス指定、既定 `scripts/service-account.json`)か JSON 文字列の `GOOGLE_SERVICE_ACCOUNT_JSON`。
-     `npm run sync:sheets:local` は `.env.development` が指すローカル Supabase へ同期する(`--env <file>` で任意の環境ファイルを指定可)
-   - 注意: `npm run dev` は `.env.development`(ローカル Supabase)を読むため、ローカルで
-     データを見たい場合は `sync:sheets:local` が必要。本番データをローカルに反映したい場合もこれを使う
+    - 手動/CLI のシート確認(Worker を起動せずに取り込み結果を見る): `npm run sheets:preview`(tsx → `scripts/import-sheets.ts`)。
+      **Supabase にデータは書かない**(シートが唯一の正で、行は端末に置く)。定義は `public.sync_sources` が正で、
+      行が無い/ID が空なら env の `GOOGLE_SPREADSHEET_ID` を使う。鍵は `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`(パス)か
+      JSON 文字列の `GOOGLE_SERVICE_ACCOUNT_JSON`。`npm run sheets:preview:local` は `.env.development` が指す
+      ローカル Supabase の定義を読む(`npm run sheets:dump -- --env <file> --source <id> --out <path>` で行を JSON に書く)。
+      旧 `npm run sync:sheets`(シート → items の upsert)は撤去した
+    - 注意: `npm run dev` は `.env.development`(ローカル Supabase)を読むため、dev で見えるデータは**その DB の
+      定義が指すシート**になる(本番のシートをローカル dev から書き換えないこと)
 5. `npm run dev` → http://localhost:3000
 6. `npm test` — 単体テスト(`isSafeLocalPath` / エラーコード / 登録QRのコード検証)。ローカル Supabase が起動していれば `npm run test:local` で登録→紐付け→照会フローと QR許可フロー(依頼作成→preview→approve→consumed・再利用拒否)の統合テストが実際に実行される(env がない場合は自動スキップ)。dev サーバが動いていれば `node scripts/verify-registration-flow.mjs` で API 一式の実挙動検証もできる(devログイン使用)
 

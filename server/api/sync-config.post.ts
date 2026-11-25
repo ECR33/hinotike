@@ -26,7 +26,7 @@ export default defineEventHandler(async (event): Promise<SourceConfigResponse> =
 
   return {
     sources: saved.sources as SyncSource[],
-    serviceAccountConfigured: readServiceAccountKey() !== null,
+    serviceAccountConfigured: (await readServiceAccountKey()) !== null,
     updatedBy: user.email ?? null,
     updatedAt: saved.updatedAt,
     rowMissing: false,

@@ -13,7 +13,7 @@ export default defineEventHandler(async (event): Promise<SourceConfigResponse> =
   const loaded = await loadSources(event)
   return {
     sources: loaded.sources,
-    serviceAccountConfigured: readServiceAccountKey() !== null,
+    serviceAccountConfigured: (await readServiceAccountKey()) !== null,
     updatedBy: loaded.updatedBy,
     updatedAt: loaded.updatedAt,
     rowMissing: loaded.rowMissing,

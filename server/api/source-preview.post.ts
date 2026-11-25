@@ -37,7 +37,7 @@ export default defineEventHandler(async (event): Promise<SourcePreviewResponse> 
     sample: [],
   }
 
-  if (!readServiceAccountKey()) {
+  if (!(await readServiceAccountKey())) {
     return { ...base, error: 'GOOGLE_SERVICE_ACCOUNT_JSON が未設定です(Worker の secret に設定)' }
   }
   if (!source.spreadsheetId) {

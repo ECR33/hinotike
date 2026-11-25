@@ -154,11 +154,12 @@ try {
 }
 
 // dev サーバにサービスアカウント鍵が無いと check/flush が 400 になり、上の失敗は全部その副作用なので原因を先頭に書く。
-  // (.env.development の GOOGLE_SERVICE_ACCOUNT_JSON=./scripts/service-account.json は Nuxt には パス文字列 として渡り、
-  //  鍵 JSON として parse されないため dev では「鍵なし」扱いになる。書き込み側まで検証したいときは鍵の JSON 文字列を env に渡して起動する)
+  // 鍵は dev では `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`(.env.development にある)から fs で読むか `.dev.vars` の
+  //  JSON(`globalThis.__env__`)を使う(server/utils/googleSheets.ts の readServiceAccountKey)。
+  //  ここが 400 になるのは「鍵ファイルも .dev.vars も無い」場合(scripts/service-account.json を置くか .dev.vars を作る)
   if ((await page.textContent('body').catch(() => '')).includes('GOOGLE_SERVICE_ACCOUNT_JSON')) {
     failures.unshift(
-      'dev サーバに サービスアカウント鍵が無いので書き込みが 400 で落ちた(.env.development の GOOGLE_SERVICE_ACCOUNT_JSON はパス指定なので鍵として読まれない。鍵の JSON 文字列を env に渡して dev サーバを起動し直すこと)',
+      'dev サーバに サービスアカウント鍵が無いので書き込みが 400 で落ちた(`GOOGLE_SERVICE_ACCOUNT_JSON_PATH` が指すファイル(scripts/service-account.json)か `.dev.vars` の鍵 JSON が必要です)',
     )
   }
 

@@ -38,7 +38,7 @@ export default defineEventHandler(async (event): Promise<RemarkUpdateResponse> =
   }
 
   const source = await requireSource(event, body?.sourceId)
-  const sa = readServiceAccountKey()
+  const sa = await readServiceAccountKey()
   if (!sa) {
     throw createError({ statusCode: 400, statusMessage: 'GOOGLE_SERVICE_ACCOUNT_JSON が未設定です(Worker の secret に設定)' })
   }
