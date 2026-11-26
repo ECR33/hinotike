@@ -28,10 +28,15 @@ function matrixData(text) {
 // シートの行を /api/import の分页で読む(server の照会APIは撤去した。取り込み応答が唯一の sheet 読み)。
 async function sheetRows(pg, maxPages = 10) {
   return pg.evaluate(async (pages) => {
+    // import は sourceId 必須(どのデータセットの作業か決める)。ID が空の定義は避ける。
+    const cfg = await (await fetch('/api/sync-config')).json()
+    const sources = cfg.sources ?? []
+    const source = sources.find((s) => s.enabled !== false && s.spreadsheetId) ?? sources[0]
+    if (!source?.id) return []
     const rows = []
     let cursor = 0
     for (let i = 0; i < pages; i++) {
-      const j = await (await fetch(`/api/import?limit=200&cursor=${cursor}`)).json()
+      const j = await (await fetch(`/api/import?sourceId=${source.id}&limit=200&cursor=${cursor}`)).json()
       rows.push(...(j.rows ?? []))
       if (!j.nextCursor) break
       cursor = Number(j.nextCursor)
@@ -92,6 +97,8 @@ const scanning = () =>
 const failures = []
 try {
   await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
+  // dev は Vite の hydration が後着する。先に押すと click ハンドラが未接続で通信が起きない。
+  await page.waitForTimeout(1200)
   await page.getByRole('button', { name: 'dev ログイン' }).click()
   await page.waitForFunction(() => location.pathname === '/scan', { timeout: 15000 })
   await page.waitForFunction(scanning, undefined, { timeout: 15000 })

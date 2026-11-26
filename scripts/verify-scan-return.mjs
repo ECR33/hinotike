@@ -132,6 +132,8 @@ const openAdmin = () => page.locator('.admin-card').evaluate((el) => { el.open =
 const failures = []
 try {
   await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
+  // dev は Vite の hydration が後着する。先に押すと click ハンドラが未接続で通信が起きない。
+  await page.waitForTimeout(1200)
   await page.getByRole('button', { name: 'dev ログイン' }).click()
   await page.waitForFunction(() => location.pathname === '/scan', { timeout: 15000 })
   await drawBlank()
@@ -141,6 +143,10 @@ try {
   await page.waitForFunction(framesReady(), undefined, { timeout: 15000 }).catch(() =>
     failures.push('初期の /scan で映像が流れない'),
   )
+
+  // 照合は端末ミラーが読むので、先にこの端末へ取り込む(未取り込みだと scan は照会しない)
+  await page.getByRole('group', { name: '作業するデータセット' }).getByRole('button', { name: 'このデータを端末に取り込む' }).click()
+  await page.waitForFunction(() => document.body.textContent?.includes('取り込み完了'), { timeout: 60000 })
 
   // 照会(モードチップの「照会」)= 検出1回で /result へ
   await page.getByRole('button', { name: '照会' }).click()

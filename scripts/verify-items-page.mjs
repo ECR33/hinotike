@@ -46,6 +46,8 @@ let ok = true
 
 async function login() {
   await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
+  // dev は Vite の hydration が後着する。先に押すと click ハンドラが未接続で通信が起きない。
+  await page.waitForTimeout(1200)
   await page.fill('input[placeholder="email"]', approver[0])
   await page.fill('input[placeholder="password"]', approver[1])
   await page.getByRole('button', { name: 'dev ログイン' }).click()
@@ -93,8 +95,9 @@ async function mirrorMissingPairs(pg) {
     })
     const rows = await new Promise((resolve, reject) => {
       const tx = db.transaction('items', 'readonly')
-      tx.objectStore('items').getAll().onsuccess = () => resolve(tx.result)
-      tx.onerror = () => reject(tx.error)
+      const req = tx.objectStore('items').getAll()
+      req.onsuccess = () => resolve(req.result ?? [])
+      req.onerror = () => reject(req.error)
     })
     db.close()
     return rows.filter((r) => !(r.payload?.['学年'] && r.payload?.['クラス'])).length
@@ -109,8 +112,8 @@ await login()
 
 // 一覧は端末ミラーを読むので先に /scan から取り込む(dev シートは読み取りのみ。書き込まない)
 await page.goto(`${base}/scan`, { waitUntil: 'networkidle' })
-await page.locator('.admin-card > summary').click()
-await page.getByRole('button', { name: 'このデータを端末に取り込む' }).click()
+// 取り込みボタンはデータセット選択の行(chip-row)と管理欄に出る(2個)。選択側の行を打つ。
+await page.getByRole('group', { name: '作業するデータセット' }).getByRole('button', { name: 'このデータを端末に取り込む' }).click()
 await page
   .waitForFunction(() => document.body.textContent?.includes('取り込み完了'), undefined, { timeout: 60000 })
   .catch(() => {
@@ -671,7 +674,7 @@ await waitSettled()
 const totalAbsent = await statusTotal()
 const remarkTextOnAbsent = await openFirstRowAndRemark()
 out.push(
-  `備考の有無 → あり=${totalPresent} / なし=${totalAbsent} / 和=${totalPresent + totalAbsent}(全件 ${totalAll} と一致)=${totalPresent + totalAbsent === totalAll} / ありの行の備考="${remarkTextOnFirst}"(空でない) / なしの行の備考="${remarkTextOnAbsent}"(空) / URLに remarkState=absent=${page.url().includes('remarkState=absent')}`,
+  `備考の有無 → あり=${totalPresent} / なし=${totalAbsent} / 和=${totalPresent + totalAbsent}(全件 ${totalAll} と一致)=${totalPresent + totalAbsent === totalAll} / ありの行の備考="${remarkTextOnFirst}"(空でない) / なしの行の備考="${remarkTextOnAbsent}"(空) / ミラー照合(条件は URL に写らない)`,
 )
 if (totalPresent <= 0 || totalAbsent <= 0 || totalPresent + totalAbsent !== totalAll) ok = false
 if (!remarkTextOnFirst) ok = false
@@ -691,7 +694,7 @@ const totalRemark = await statusTotal()
 const remarkSearchLabel = await remarkToggle.textContent()
 const remarkOnSearchRow = await openFirstRowAndRemark()
 out.push(
-  `備考の文字検索(振込) → total=${totalRemark}(あり ${totalPresent} 以下)=${totalRemark <= totalPresent} / 先頭の行の備考="${remarkOnSearchRow?.slice(0, 40)}" / 検索語を含む=${!!remarkOnSearchRow && remarkOnSearchRow.includes('振込')} / URLに remark=${page.url().includes('remark=')} / トグルのラベル="${remarkSearchLabel?.trim()}"`,
+  `備考の文字検索(振込) → total=${totalRemark}(あり ${totalPresent} 以下)=${totalRemark <= totalPresent} / 先頭の行の備考="${remarkOnSearchRow?.slice(0, 40)}" / 検索語を含む=${!!remarkOnSearchRow && remarkOnSearchRow.includes('振込')} / ミラー照合(条件は URL に写らない) / トグルのラベル="${remarkSearchLabel?.trim()}"`,
 )
 if (totalRemark <= 0 || totalRemark > totalPresent || !remarkOnSearchRow?.includes('振込')) ok = false
 if (!remarkSearchLabel?.includes('振込')) ok = false
@@ -763,10 +766,9 @@ if (!chosen) {
   const totalKeyAbsent = await statusTotal()
   const sumOk = totalKeyPresent + totalKeyAbsent === totalAll && chosen.present + chosen.absent === totalAll
   out.push(
-    `項目の有無(${chosen.label}) → あり=${totalKeyPresent}(ボタン件数 ${chosen.present}) / なし=${totalKeyAbsent}(ボタン件数 ${chosen.absent}) / 和=${totalKeyPresent + totalKeyAbsent}(全件 ${totalAll})=${sumOk} / URLに filters=${page.url().includes('filters=')}`,
+    `項目の有無(${chosen.label}) → あり=${totalKeyPresent}(ボタン件数 ${chosen.present}) / なし=${totalKeyAbsent}(ボタン件数 ${chosen.absent}) / 和=${totalKeyPresent + totalKeyAbsent}(全件 ${totalAll})=${sumOk} / ミラー照合(条件は URL に写らない)`,
   )
   if (!sumOk || totalKeyPresent !== chosen.present || totalKeyAbsent !== chosen.absent) ok = false
-  if (!page.url().includes('filters=')) ok = false
 
   // 再押で解除して全件に戻る(aria-pressed=false)
   await absentBtn.click()
@@ -802,8 +804,8 @@ if (!chosen) {
   await page.getByPlaceholder('値の一部を入力').fill('未')
   await waitSettled()
   const containsTotal = await statusTotal()
-  const containsOk = containsTotal > 0 && containsTotal <= depositInfo && page.url().includes('contains')
-  out.push(`項目の部分一致(入金状況 に「未」) → total=${containsTotal}(あり件数 ${depositInfo} 以下かつ>0)=${containsOk} / URLに contains=${page.url().includes('contains')}`)
+  const containsOk = containsTotal > 0 && containsTotal <= depositInfo
+  out.push(`項目の部分一致(入金状況 に「未」) → total=${containsTotal}(あり件数 ${depositInfo} 以下かつ>0)=${containsOk} / ミラー照合(部分一致)`)
   if (!containsOk) ok = false
   await page.getByPlaceholder('値の一部を入力').fill('')
   await waitSettled()
@@ -817,8 +819,8 @@ if (!chosen) {
   await payChip.click()
   await waitSettled()
   const chipTotal = await statusTotal()
-  const chipOk = chipTotal === payChipCount && (page.url().includes('in%7C') || page.url().includes('|in|'))
-  out.push(`項目の値 chip(支払い方法) → "${(await payChip.textContent()).trim()}" → total=${chipTotal}(chip 件数 ${payChipCount} と一致)=${chipOk} / URLに in=${page.url().includes('in%7C') || page.url().includes('|in|')} (現在のURL=${page.url().slice(-160)})`)
+  const chipOk = chipTotal === payChipCount
+  out.push(`項目の値 chip(支払い方法) → "${(await payChip.textContent()).trim()}" → total=${chipTotal}(chip 件数 ${payChipCount} と一致)=${chipOk} / ミラー照合(値 chip の多选択=同一キー内 OR)`)
   if (!chipOk) ok = false
   await payChip.click()
   await waitSettled()

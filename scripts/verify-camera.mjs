@@ -20,6 +20,8 @@ const errors = []
 page.on('pageerror', (e) => errors.push(String(e)))
 
 await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
+  // dev は Vite の hydration が後着する。先に押すと click ハンドラが未接続で通信が起きない。
+  await page.waitForTimeout(1200)
 await page.getByRole('button', { name: 'dev ログイン' }).click()
 await page.waitForFunction(() => document.querySelector('h1')?.textContent?.includes('QR'), { timeout: 10000 })
 

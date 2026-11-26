@@ -17,9 +17,9 @@
 | OAuth コールバック | `GET /api/auth/callback` で `exchangeCodeForSession(code)`。`returnTo` をサポート | `GET /api/auth-callback` で交換 → 即 `link_my_tenant_user()` RPC。`returnTo` は無く常に `/select-tenant` |
 | サイトルートへ戻るフォールバック | `server/middleware/oauth-root-callback.ts` で `/?code=` を `/api/auth/callback` へ引き継ぐ | Site URL/Redirect URLs を厳密に登録する運用。フォールバック処理なし |
 | セカンド OAuth(Slack) | 該当なし | **HMAC 署名付き state**(tenantId, userId, nonce, exp, 5分) + **PKCE code_verifier を httpOnly/lax cookie に保存**、callback で署名・期限・セッション一致・cookie 使い捨てを全検証 |
-| サーバ側の認証ガード | 各 API で `getSession()` → `users` 照会をeach実装(me/lookup で重複) | 各 API で `serverSupabaseUser(event)` による 1 行ガード + RLS + RPC 内の `auth.role()` ガード |
+| サーバ側の認証ガード | 各 API で `getSession()` → `users` 照会を各自実装(`me` と設定・シート読み取り系で重複) | 各 API で `serverSupabaseUser(event)` による 1 行ガード + RLS + 共通 guard |
 | service_role / secret key 運用 | `supabaseAdminClient()` は定義されているが主な API では未使用(RLS 前提) → 方針は一貫 | `serverSupabaseServiceRole` を使うが、DB 関数側で `if auth.role() <> 'service_role' then raise` を二重ガード |
-| RLS | `users_self_select`(自分行のみ) / `items_select_for_registered_users`(`exists(users)`) | 全テーブルに `tenant_isolation_{select,insert,delete}`。policy は SQL 関数 1 本に集約 |
+| RLS | `users_self_select`(自分行のみ) / データ本体テーブルの select ポリシー(`exists(users)`。現行では 0009 で drop 済み) | 全テーブルに `tenant_isolation_{select,insert,update,delete}` + `tenant_is_member()` 関数 |
 | エラーの見せ方 | `?error=<エラーメッセージ文字列>` をそのままクエリに載せ UI に表示 | `?slack_oauth_error=<固定エラーコード>` のホワイトリスト方式で UI 側で文言出し分け |
 | ログ/診断 | なし | `server/api/debug-env.ts`(設定の有無のみ返す。Cloudflare env key 一覧も) |
 | テスト | なし | `test/supabase/login-to-top-flow.test.ts` など、実ログイン → RPC → 所属チェックまで通す flow テスト、SQL 側テスト(`supabase/tests/*.sql`) |
@@ -88,8 +88,8 @@
 - 改善: `middleware/auth.global.ts` に移行し、`const publicRoutes = ['/', '/login', '/unauthorized']` 方式へ。`/unauthorized` は本来「認証済み・未登録」専用なので、middleware から直接飛ばすなら**ログイン状態を条件付きで公開扱い**にするなど、参考実装より一段丁寧に設計する。
 
 ### P1-3 サーバ API のガードが重複・手コピー
-- `server/api/me.get.ts:11-27` と `server/api/lookup.post.ts:10-24` が session 取得 + `users` 照会を重複。追加 API でコピー漏れが起きると認証だけの穴になる。
-- 改善: `server/utils/guard.ts` に `requireRegisteredUser(event)` を作り、`me`/`lookup` から呼ぶ。返り値で `session` と `userRow` を共有する。参考リポジトリの `is_member_of_tenant()` と同じ思想(SQL 側 1 本 + API 側 1 本)。
+- レビュー当時: `server/api/me.get.ts` と設定・シート読み取り系の API が session 取得 + `users` 照会を各自実装していた。追加 API でコピー漏れが起きると「ログインだけ通る・認可を通らない」穴になる。
+- 改善は入った: `server/utils/authguard.ts` の `requireRegisteredUser(event)` に集約し、残る API(`me`・`sync-config`・`source-preview`・`import`・`scan-config`・`scan-columns`・`scan-flush`・`scan-offline-flush`・`remark-update`・`scan-history`)が同じ guard を読む(返り値で `session` と `userRow` を共有)。参考リポジトリの `insertMembership()` 相当の「DB 側でも認可を見る」形は RPC の `is_registered_user()` チェックが担う。
 
 ### P1-4 `oauth-root-callback.ts` のフォールバックは運用で消すべき
 - Site URL ルートへ `?code=` が飛んでくるケースを救済しているが、README 自身が指摘するとおり別オリジンでは PKCE verifier が無いため交換できない。「動くが半分壊れる」状態を作るくらいなら、Redirect URLs 登録を厳しくし、フォールバックは **警告ログ + `/api/auth/callback` への 1 回だけの変換** に絞る(現状はほぼそれで OK。`returnTo` 検証は P0-3 に合わせて修正が必要)。
@@ -106,15 +106,15 @@
   - 注意: email 一致の自動紐付けは「事前にメールを登録しておけば、そのアドレスの Google アカウントで誰でも入れる」構造になる。Google Workspace のドメイン制限、`auth.users.email_confirmed_at` 確認、または「ログイン後に確認コード」のいずれかとセットにする。
 - 併用案(安全側): 事前登録は email で受け、`users` 本体への反映は `link_my_user()` で `id` を埋めるが、`email_verified` と許可ドメインのチェックを関数内に置く。
 
-### P1-7 items RLS ポリシーの `users` 参照と自己参照の潜在リスク
-- `supabase/schema.sql` の `items_select_for_registered_users` は `exists (select 1 from public.users u ...)`。`users` 側の `users_self_select` は自分自身の行を `users` から読む自己参照で、RLS ではトリガーの再帰が起き得る(Supabase は `auth.uid()` 系なら安全側へ倒すが、`users` を RLS 越しに読む形は避けたい)。
-- 改善: 参考リポジトリと同じく SQL 関数 1 本に集約する。
+### P1-7 RLS ポリシーの `users` 参照と自己参照の潜在リスク
+- レビュー当時のデータ本体テーブルの select ポリシーは `exists (select 1 from public.users u ...)` を直接読んでいた。`users` 側の `users_self_select` は自分自身の行を `users` から読む自己参照で、RLS ではトリガーの再帰が起き得る(Supabase は `auth.uid()` 系なら安全側へ倒すが、`users` を RLS 越しに読む形は避けたい)。
+- 改善は入った: 判定を SQL 関数 1 本(`public.is_registered_user()`, 0001 で作成)に集約し、マイグレーションのポリシーと API guard が同じ関数を読む。データ本体テーブルと旧の同期設定テーブルは 0009 で drop され、残るテーブル(`sync_sources`・`scan_modes`・`scan_events`)のポリシーが同じ関数を使う。
   ```sql
   create or replace function public.is_registered_user()
   returns boolean language sql stable security invoker set search_path = public as
   $$ select exists (select 1 from public.users u where u.id = auth.uid()) $$;
   ```
-  policy は `using (public.is_registered_user())`。関数化で評価が 1 段になり、API 側とも同じ 1 本を共有できる。あわせて `items` の `code` に index 確認、`payload` の秘匿レベル見直し。
+  policy は `using (public.is_registered_user())`。関数化で評価が 1 段になり、API 側とも同じ 1 本を共有できる。あわせて証跡(`scan_events`)の select/insert のみポリシー = 不変性、定義(`sync_sources`)の秘匿レベル(シート ID・列名のみで氏名は載らない)見直し。
 
 ### P2 追加で入れておきたいもの
 - **設定ヘルスチェック API**(`server/api/health.get.ts`): 参考リポジトリの `debug-env.ts` 相当。ただし**値も key 名も出さず真偽のみ**、可能なら secret header 必須。Cloudflare env key 一覧は無認証で返さない。
@@ -123,10 +123,10 @@
 - **テスト**: 参考リポジトリの `test/supabase/login-to-top-flow.test.ts` / `supabase/tests/*.sql` を模して、
   1. code 交換 → `/api/me` → `users` 未登録なら 403、
   2. `returnTo` に `//evil` を入れてもローカルに留まる、
-  3. 未認証で `POST /api/lookup` → 401、
-  4. RLS: 未登録ユーザが `items` を select できない、
+  3. 未認証で `POST /api/sync-config` / `POST /api/remark-update` / `POST /api/scan-flush` → 401、
+  4. RLS: 未登録ユーザが `sync_sources` / `scan_modes` / `scan_events` を select できない、
   を押さえる。
-- **secret key 運用の明確化**: `supabaseAdminClient()` は使われていない。同期スクリプト専用とコメントで明記し、API から呼ばない方針を固定(参考リポジトリの `auth.role()` ガードのような DB 側ガードは、hinotike では RLS 1 本で統一する方が単純)。
+- **secret key 運用の明確化**: `supabaseAdminClient()` はアプリ側で使われていない(CLI のシート dump / 定義の読み取り専用)。API から呼ばない方針を固定(参考リポジトリの `auth.role()` ガードのような DB 側ガードは、hinotike では RLS 1 本で統一する方が単純)。
 
 ---
 

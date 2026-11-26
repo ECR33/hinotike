@@ -113,6 +113,8 @@ const body = () => page.textContent('body').catch(() => '')
 
 try {
   await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
+  // dev は Vite の hydration が後着する。先に押すと click ハンドラが未接続で通信が起きない。
+  await page.waitForTimeout(1200)
   await page.getByRole('button', { name: 'dev ログイン' }).click()
   await page.waitForFunction(() => location.pathname === '/scan', { timeout: 15000 })
   const me = await page.evaluate(async () => (await (await fetch('/api/me')).json()))
@@ -132,8 +134,13 @@ try {
   ok('/items が別利用者のミラー一覧を出さない', !itemsBody.includes('この端末のデータ('), itemsBody.includes('別の利用者が取り込んだもの') ? '注記あり' : '注記なし')
   ok('/items の氏名がミラーから出ていない', !itemsBody.includes('別ユーザ太郎'))
 
-  await page.goto(`${base}/result?code=TESTCODE`, { waitUntil: 'networkidle' })
-  ok('/result が別利用者のミラーでフォールバック照会しない', !(await body()).includes('スナップショット照会') && !(await body()).includes('別ユーザ太郎'))
+  // dev(Vite)ではこの画面が networkidle に到達しない(HMR の接続が張り続ける)ので domcontentloaded+待ち
+  await page.goto(`${base}/result?code=TESTCODE`, { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(800)
+  // 照会は端末ミラーだけ(uid 一致のもの)。別利用者のミラーから氏名を出す経路は無い。
+  // SSR は IDB を読めないので「この端末ではまだ取り込んでいない」案内になる。
+  const resultBody = await body()
+  ok('/result が別利用者のミラーから氏名を出さない', !resultBody.includes('別ユーザ太郎'), resultBody.slice(0, 120).replace(/\s+/g, ' '))
 
   // ── 自分のミラー(uid 一致)で削除 ──
   await seedMirror(me.uid, sourceId, '自分の太郎')

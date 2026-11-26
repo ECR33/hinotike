@@ -34,9 +34,10 @@ try {
   const urlA = await devLogin(requester, '/login', 'newcomer@example.com')
   expect(urlA.includes('/unauthorized'), '未登録ユーザは /unauthorized に誘導される')
   await requester.getByRole('button', { name: /許可を求める/ }).click()
-  await requester.waitForSelector('img[src^="data:image"]', { timeout: 5000 }).catch(() => {})
-  const qrSrc = await requester.getAttribute('img[src^="data:image"]', 'src').catch(() => null)
-  expect(Boolean(qrSrc), '依頼者画面に QR(data:image)が表示される')
+  // QR は QrDots(svg)で描く(data:image の imgではない)
+  await requester.waitForSelector('.qr-box svg', { timeout: 5000 }).catch(() => {})
+  const qrSvg = await requester.locator('.qr-box svg').count()
+  expect(qrSvg > 0, '依頼者画面に QR(QrDots の svg)が表示される')
   const meA = await requester.evaluate(async () => {
     const r = await fetch('/api/me'); return r.json()
   })

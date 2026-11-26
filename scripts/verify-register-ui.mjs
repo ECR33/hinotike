@@ -78,6 +78,8 @@ async function main() {
 
   // 許可者としてログインし /register でスキャン待機
   await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
+  // dev は Vite の hydration が後着する。先に押すと click ハンドラが未接続で通信が起きない。
+  await page.waitForTimeout(1200)
   await page.getByPlaceholder('email').fill(APPROVER)
   await page.getByPlaceholder('password').fill(PASSWORD)
   await page.getByRole('button', { name: 'dev ログイン' }).click()

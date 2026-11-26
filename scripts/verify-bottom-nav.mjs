@@ -26,6 +26,8 @@ async function login(email, password) {
     if (m.type() === 'error' || m.type() === 'warning') warns.push(`${m.type()}: ${m.text().slice(0, 160)}`)
   })
   await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
+  // dev は Vite の hydration が後着する。先に押すと click ハンドラが未接続で通信が起きない。
+  await page.waitForTimeout(1200)
   await page.fill('input[placeholder="email"]', email)
   await page.fill('input[placeholder="password"]', password)
   await page.getByRole('button', { name: 'dev ログイン' }).click()

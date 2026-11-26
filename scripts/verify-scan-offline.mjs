@@ -30,10 +30,15 @@ function matrixData(text) {
 // シートの行を /api/import の分页で読む(server の照会APIは撤去した。取り込み応答が唯一の sheet 読み)。
 async function sheetRows(pg, maxPages = 10) {
   return pg.evaluate(async (pages) => {
+    // import は sourceId 必須(どのデータセットの作業か決める)。ID が空の定義は避ける。
+    const cfg = await (await fetch('/api/sync-config')).json()
+    const sources = cfg.sources ?? []
+    const source = sources.find((s) => s.enabled !== false && s.spreadsheetId) ?? sources[0]
+    if (!source?.id) return []
     const rows = []
     let cursor = 0
     for (let i = 0; i < pages; i++) {
-      const j = await (await fetch(`/api/import?limit=200&cursor=${cursor}`)).json()
+      const j = await (await fetch(`/api/import?sourceId=${source.id}&limit=200&cursor=${cursor}`)).json()
       rows.push(...(j.rows ?? []))
       if (!j.nextCursor) break
       cursor = Number(j.nextCursor)
@@ -92,6 +97,8 @@ const scanning = () => () => [...document.querySelectorAll('.muted')].map((p) =>
 const failures = []
 try {
   await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
+  // dev は Vite の hydration が後着する。先に押すと click ハンドラが未接続で通信が起きない。
+  await page.waitForTimeout(1200)
   await page.getByRole('button', { name: 'dev ログイン' }).click()
   await page.waitForFunction(() => location.pathname === '/scan', { timeout: 15000 })
   await page.waitForFunction(scanning, undefined, { timeout: 15000 })
@@ -130,8 +137,13 @@ try {
     const NAME = picked.name ?? CODE
 
     // ── データの取り込み(通信あり)── データセット欄は管理欄(details)の中なので開いてから押す
+    // 管理欄(details)を開いておくと、後の「端末のデータを完全に削除」などが押せる。
     await page.locator('.admin-card > summary').click()
-    await page.getByRole('button', { name: 'このデータを端末に取り込む' }).click()
+    // 取り込みボタンは管理欄にもあるので、データセット選択の行(chip-row)側を打つ(strict mode 回避)。
+    await page
+      .getByRole('group', { name: '作業するデータセット' })
+      .getByRole('button', { name: 'このデータを端末に取り込む' })
+      .click()
     await page
       .waitForFunction(() => document.body.textContent?.includes('取り込み完了'), undefined, { timeout: 60000 })
       .catch(() => failures.push('取り込み完了の注記が出ない'))
@@ -281,7 +293,8 @@ try {
       // 削除はミラー(items/snapshot)+localStorage のメタ/選択+ページキャッシュを消し、
       // ためた記録は氏名だけ除去して code/modeId/at を残す(確定能力は失わない)。
       await page.goto(`${base}/scan`, { waitUntil: 'networkidle' })
-      await page.getByRole('button', { name: /管理 — 端末内のデータ/ }).click().catch(() => {})
+      // 管理欄は details なので開かないと「端末のデータを完全に削除」が押せない
+      await page.locator('.admin-card > summary').click()
       await page.getByRole('button', { name: '端末のデータを完全に削除' }).click()
       await page
         .waitForFunction(() => document.body.textContent?.includes('この端末のデータを削除しました'), undefined, { timeout: 10000 })

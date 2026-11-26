@@ -26,9 +26,15 @@ const browser = await chromium.launch({
 const page = await browser.newPage()
 
 await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
+  // dev は Vite の hydration が後着する。先に押すと click ハンドラが未接続で通信が起きない。
+  await page.waitForTimeout(1200)
 await page.getByRole('button', { name: 'dev ログイン' }).click()
 await page.waitForFunction(() => document.querySelector('h1')?.textContent?.includes('QR'), { timeout: 10000 })
 await page.waitForFunction(() => document.querySelector('.muted')?.textContent?.includes('スキャン中'), { timeout: 10000 })
+
+// 照合は端末ミラーが読むので、先にこの端末へ取り込む(未取り込みだと scan は照会しない)
+await page.getByRole('group', { name: '作業するデータセット' }).getByRole('button', { name: 'このデータを端末に取り込む' }).click()
+await page.waitForFunction(() => document.body.textContent?.includes('取り込み完了'), { timeout: 60000 })
 
 // 小モードに切替: ライブラリ overlay の枠が短辺の25%になり、内部3倍拡大の案内が出ることを確認
 // (切り替えは pause/start で照合領域を再適用するので、status が25%になってから撮る)

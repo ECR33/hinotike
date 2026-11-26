@@ -6,7 +6,7 @@
 //     → 注意: VERIFY_SCAN_FLUSH は設定されたスプレッドシートに 配布済 / 配布日時 を書く。
 //       ローカルの dev シート(scripts/service-account.json が指す ID)に対してだけ実行すること。
 //
-// 使うコードは実行時にローカル items から 未記録(配布済≠済)の行を3件 pick する
+// 使うコードは実行時に**端末ミラー**から 未記録(配布済≠済)の行を3件 pick する(スキャンの照合はミラーが読む)
 // (ハードコードだと flush 実行後に済へ変わって dedupe warn になり再実行できない)。
 // モードは「チケット配布」(confirm_before_record=false = 連続で次々と記録)を選ぶ。
 import { chromium } from 'playwright-core'
@@ -35,6 +35,8 @@ const page = await browser.newPage()
 
 async function loginAndOpenScan() {
   await page.goto(`${base}/login`, { waitUntil: 'networkidle' })
+  // dev は Vite の hydration が後着する。先に押すと click ハンドラが未接続で通信が起きない。
+  await page.waitForTimeout(1200)
   await page.getByRole('button', { name: 'dev ログイン' }).click()
   await page.waitForFunction(() => location.pathname === '/scan', { timeout: 15000 })
   // fakeカメラがスキャン中になるまで待つ(canvas の解像度を video.videoWidth に合わせるため)
@@ -58,7 +60,13 @@ async function streamCode(text) {
         canvas.width = w
         canvas.height = h
         window.__scanCanvas = canvas
-        video.srcObject = canvas.captureStream(10)
+      }
+      // モード選択でスキャナーが再マウントされると video が新しい要素になり srcObject が消える(または
+      // fakeカメラの stream が残る)。canvas は再利用し、**作った stream を毎回 video に結び直す**
+      // (同じ stream を再利用するので描画が流れ続ける。1件目が旧 video に流れない)。
+      if (!window.__scanStream) window.__scanStream = canvas.captureStream(10)
+      if (video.srcObject !== window.__scanStream) {
+        video.srcObject = window.__scanStream
         void video.play?.()?.catch?.(() => {})
       }
       const ctx = canvas.getContext('2d')
@@ -86,28 +94,46 @@ async function listText() {
 }
 
 let failures = []
+// /scan の取り込みボタンで端末ミラーを作る(scan の照合はミラーが読むので取り込みが必須)。
+async function importMirror() {
+  await page.getByRole('group', { name: '作業するデータセット' }).getByRole('button', { name: 'このデータを端末に取り込む' }).click()
+  await page
+    .waitForFunction(() => document.body.textContent?.includes('取り込み完了'), undefined, { timeout: 60000 })
+    .catch(() => failures.push('取り込み完了の注記が出ない(ミラーが無いとスキャンできない)'))
+}
+
+/** 端末ミラー(items ストア)の行を読む(取り込み済みの実データ)。 */
+async function mirrorRows() {
+  return page.evaluate(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open('hinotike-offline')
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => reject(req.error)
+    })
+    const rows = await new Promise((resolve, reject) => {
+      const tx = db.transaction('items', 'readonly')
+      const req = tx.objectStore('items').getAll()
+      req.onsuccess = () => resolve(req.result ?? [])
+      req.onerror = () => reject(tx.error)
+    })
+    db.close()
+    return rows
+  })
+}
+
 try {
   await loginAndOpenScan()
+  await importMirror()
 
   // 未記録の行を3件 pick(チケット配布は 配布済 を書く。スキャン済み=済の行は
   // dedupe warn になるので、開始時に未記録の行を選ぶことで再実行できる)。
   // 待機列の行は氏名を出す(entry.name があれば氏名、なければ code)ので実データの氏名で確認する。
-// /api/import はシートを読むだけで端末に書かない(このスクリプトはミラーを作らない)。
-  // シートの行を /api/import から読む(server の照会APIは撤去した。取り込み応答が唯一の行読み)。
-  const picked = await page.evaluate(async () => {
-    const rows = []
-    let cursor = 0
-    for (let i = 0; i < 10; i++) {
-      const j = await (await fetch(`/api/import?limit=200&cursor=${cursor}`)).json()
-      rows.push(...(j.rows ?? []))
-      if (!j.nextCursor) break
-      cursor = Number(j.nextCursor)
-    }
-    return rows
-      .filter((r) => r.payload?.['配布済'] !== '済' && (r.payload?.['氏名'] ?? '') !== '')
-      .slice(0, 3)
-      .map((r) => ({ code: String(r.code), name: String(r.payload['氏名']) }))
-  })
+  // 未記録の行を3件 pick(チケット配布は 配布済 を書く。済の行は dedupe warn になるので
+  // 未記録の行を選ぶことで再実行できる)。スキャンの照合はミラーを読むのでミラー側から pick する。
+  const picked = (await mirrorRows())
+    .filter((r) => r.payload?.['配布済'] !== '済' && (r.payload?.['氏名'] ?? '') !== '')
+    .slice(0, 3)
+    .map((r) => ({ code: String(r.code), name: String(r.payload['氏名']) }))
   if (picked.length < 3) {
     failures.push(`未記録(配布済≠済)の items 行が3件無い(${picked.length}件)。/sync か dev シートの 配布済 を戻す`)
   }
