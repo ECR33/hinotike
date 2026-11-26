@@ -359,16 +359,16 @@ export function offlineItemsQuery(rows: ItemRowData[], input: OfflineItemsQueryI
   const pairs = normalizePairs(input.pairs)
   const keyFilters = normalizeKeyFilters(input.filters)
   const cursorText = typeof input.cursor === 'string' ? input.cursor.trim() : ''
-  const cursorNum = cursorText ? Number(cursorText) : Number.NaN
-  // server は int code を数値で gt する。不正カーソル(数値でない)は照会側が落ちる代わりに無視する
-  // (ローカルのカーソルは offlineItemsQuery が last code から作るため常に数値。防御扱い)
-  const hasCursor = cursorText !== '' && Number.isFinite(cursorNum)
+  // カーソルは**並びと同じ比較**(compareFacetValues)で進む。数値だけ数値で比較するカーソルだと
+  // `A0001` のような英数字 code が `Number(code) > cursor` で永久にこぼれる(実測: dev シートで
+  // 312件のうち299件までしか進まなかった)。空・非文字列のカーソルは条件なし。
+  const hasCursor = cursorText !== ''
   // clampLimit の補正(画面は limit を input と引数両方に載せるのでどちらでも効く)
   const pageSize = clampLimit(limit ?? input.limit)
 
   const sorted = [...rows].sort((a, b) => compareFacetValues(a.code, b.code))
   const matches = sorted.filter((row) => {
-    if (hasCursor && !(Number(row.code) > cursorNum)) return false
+    if (hasCursor && compareFacetValues(row.code, cursorText) <= 0) return false
     const payload = row.payload ?? {}
     if (codePattern && !containsLocalText(row.code, codePattern)) return false
     if (namePattern && !containsLocalText(payloadText(payload, ITEM_NAME_KEY), namePattern)) return false

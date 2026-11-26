@@ -323,7 +323,7 @@ async function load(opts: { reset: boolean }) {
   errorDetail.value = null
   try {
     // 端末内のミラーから絞り込み+分页する(`offlineItemsQuery` が一覧の照合意味そのもの。
-    // キーセットカーソルは `code > cursor` の数値比較で、total は一致する総件数(exact))
+    // キーセットカーソルは行の並びと同じ比較(code 昇順)で進み、total は一致する総件数(exact))
     const page: OfflineItemsPage = offlineItemsQuery(
       await offlineRowsAll(),
       {
@@ -605,10 +605,17 @@ async function loadMore(): Promise<void> {
   // 去った瞬間に in-flight の追記があると、nextTick の sentinelVisible は detach 済みで
   // true(全 rect が 0)になるのでここで打ち切る(非表示中に全件を読み進めない)。
   if (!pageActive || loading.value || done.value) return
+  // 照合できるミラーが無い(未取り込み・別利用者・uid 未解決)行は追記しない。案内カードが理由を出す。
+  // (early-return する load を sentinel が見ていて無限に追記すると画面が固まる)
+  if (mirrorStatus.value !== 'ready') return
   if (!sentinelVisible()) return
+  const beforeRows = rows.value.length
+  const beforeCursor = cursor.value
   await load({ reset: false })
   if (!pageActive) return
   await nextTick()
+  // 行もカーソルも進まない(0件・条件不一致)ならこれ以上追記しない(無限ループを防ぐ)
+  if (rows.value.length === beforeRows && cursor.value === beforeCursor) return
   if (sentinelVisible()) await loadMore()
 }
 

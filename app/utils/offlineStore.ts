@@ -89,12 +89,19 @@ function offlineRead<T>(store: string, use: (objectStore: IDBObjectStore) => IDB
 /**
  * 取り込み: ミラーを**そのデータセットで置き換える**(items を全消し→ rows を put、meta を書き込む)。
  * データセットの切替も同じ関数(前のデータセットの行は消える = 「今どちらのデータで作業するか」は1つ)。
+ *
+ * meta / rows は画面側の reactive なオブジェクト(Vue の Proxy)をそのまま渡すことがある。
+ * Proxy は IndexedDB の structured clone で `DataCloneError` になる(dev の取り込みで実測:
+ * 「Failed to execute 'put' on 'IDBObjectStore': #<Object> could not be cloned」)。
+ * 値は文字列・数値・配列のみなので JSON の往復で**素のオブジェクト**にしてから書く。
  */
 export async function offlineSaveSnapshot(meta: OfflineMeta, rows: OfflineItemRow[]): Promise<void> {
+  const plainMeta = JSON.parse(JSON.stringify(meta)) as OfflineMeta
+  const plainRows = JSON.parse(JSON.stringify(rows)) as OfflineItemRow[]
   await offlineReadWrite([OFFLINE_ITEMS_STORE, OFFLINE_SNAPSHOT_STORE], (tx) => {
     tx.objectStore(OFFLINE_ITEMS_STORE).clear()
-    for (const row of rows) tx.objectStore(OFFLINE_ITEMS_STORE).put(row, datasetKey(meta.sourceId, row.code))
-    tx.objectStore(OFFLINE_SNAPSHOT_STORE).put(meta, OFFLINE_SNAPSHOT_KEY)
+    for (const row of plainRows) tx.objectStore(OFFLINE_ITEMS_STORE).put(row, datasetKey(plainMeta.sourceId, row.code))
+    tx.objectStore(OFFLINE_SNAPSHOT_STORE).put(plainMeta, OFFLINE_SNAPSHOT_KEY)
   })
 }
 

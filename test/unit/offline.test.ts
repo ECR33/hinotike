@@ -320,6 +320,26 @@ describe('offlineItemsQuery(端末ミラーの絞り込み+分页)', () => {
     expect(third.nextCursor).toBe(null)
   })
 
+  it('英数字の code を交えてもカーソル分页が取りこぼさない(code の並びと同じ比較で進む)', () => {
+    // dev シート実測: `A0001` 型の code が数値カーソルで永久にこぼれ、312件のうち299件しか進めなかった
+    const mixed = [
+      { code: '1001', payload: {} },
+      { code: '1002', payload: {} },
+      { code: 'A0001', payload: {} },
+      { code: 'A0002', payload: {} },
+      { code: 'V0001', payload: {} },
+    ]
+    const seen: string[] = []
+    let cursor: string | undefined
+    for (;;) {
+      const page = offlineItemsQuery(mixed, { cursor }, 2)
+      seen.push(...codesOf(page))
+      if (!page.nextCursor) break
+      cursor = page.nextCursor
+    }
+    expect(seen).toEqual(['1001', '1002', 'A0001', 'A0002', 'V0001'])
+  })
+
   it('code・氏名・備考の部分一致(ilike の大文字小文字無視を再現)', () => {
     expect(codesOf(offlineItemsQuery(listRows, { code: '10' }, 10))).toEqual(['1004', '1023'])
     expect(codesOf(offlineItemsQuery(listRows, { name: '田中' }, 10))).toEqual(['200'])
