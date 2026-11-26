@@ -395,7 +395,7 @@ function groupThousands(digits: string): string {
       <p class="result-code">コード {{ code }}</p>
       <p class="result-empty-text">該当するデータが見つかりませんでした。</p>
       <p v-if="lookupStatus === 'ready'" class="muted offline-note">
-        この端末のデータ({{ offlineMeta?.itemCount ?? 0 }}件・取り込み {{ formatJst(offlineMeta?.snapshotAt ?? '') }})の中にもありません。
+        この端末に取り込んだデータの中にありません(取り込みは通信の良い場所で)。
       </p>
     </div>
 
@@ -408,11 +408,6 @@ function groupThousands(digits: string): string {
         </div>
         <p class="result-code">コード {{ result.code }}</p>
       </div>
-
-      <!-- 端末ミラー照会である旨と、履歴・備考の保存が server 通信であることを注記する -->
-      <p v-if="lookupStatus === 'ready'" class="muted offline-note">
-        この端末のデータから照会しました(取り込み {{ formatJst(offlineMeta?.snapshotAt ?? '') }} / {{ offlineMeta?.itemCount ?? 0 }}件)。シートが正なので、取り込み後にシート側で変わった値は次の取り込みまで現れません。スキャン履歴の表示と備考の保存は server に通信します(備考の保存はシートに書き、この端末のデータにも写します)。
-      </p>
 
       <!-- 金額・支払いのまとまり(1つの枠に3セル) -->
       <div v-if="money.length" class="panel money-panel" :class="money.length === 3 ? 'three' : 'two'">
@@ -500,6 +495,12 @@ function groupThousands(digits: string): string {
       <NuxtLink class="btn" to="/scan">スキャンに戻る</NuxtLink>
       <NuxtLink class="btn secondary" to="/items">一覧に戻る</NuxtLink>
     </div>
+
+    <!-- 補足は画面末尾の小さな注記(主内容は照会結果)。照会が取り込み時点のミラーであることと、
+         取り込み後のシート側の変更が次の取り込みまで現れないことを伝える(上限打ち切りもここ)。 -->
+    <p v-if="lookupStatus === 'ready'" class="muted lookup-foot">
+      端末内の取り込みデータ({{ offlineMeta?.itemCount ?? 0 }}件・{{ formatJst(offlineMeta?.snapshotAt ?? '') }}{{ offlineMeta?.capped ? '・上限で打ち切り' : '' }})から照会しました。取り込み後のシート側の変更は次の取り込みまで現れません。
+    </p>
   </div>
 </template>
 
@@ -571,6 +572,13 @@ function groupThousands(digits: string): string {
 .offline-note {
   margin: 6px 0 0;
   font-size: 12px;
+}
+
+/* 画面末尾の補足(照会結果が主内容なので目立たせない) */
+.lookup-foot {
+  margin: 10px 2px 0;
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 /* まとめ枠(金額・商品)。パネルより一段暗い面で枠線を出す */
