@@ -2,13 +2,14 @@ import type { H3Event } from 'h3'
 import { MAX_IMPORT_ROWS, type SyncRow, type SyncSource } from '#shared/utils/sync'
 import { apiFailure } from './apiError'
 import { loadSheetIndex, type SheetIndex } from './scanRun'
-import { findSource, findSourceOrNull, firstSource } from './syncRun'
+import { findSource } from './syncRun'
 
 /**
  * シート由来のデータセット行(選別・行フィルタ適用済み)の読み取り側。
- * server の一覧(items-list)/facets/keys/照会(lookup)/取り込み(import)/プレビューが
+ * server の取り込み(import)/プレビュー(source-preview)/備考の書き戻し(remark-update)が
  * **同じ行一覧**を使い、端末ミラー(IndexedDB)の行と同じ意味で shared の照合関数に渡せる。
- * Supabase の items テーブルは読まない(シートが唯一の正)。
+ * 一覧・照会・スキャンの照合は**端末ミラー側で走る**(server に照会APIは無い)。
+ * データ本体のテーブルは Supabase に作らない(シートが唯一の正、データは端末に置く)。
  */
 export interface DatasetRows {
   source: SyncSource
@@ -19,7 +20,7 @@ export interface DatasetRows {
   rows: SyncRow[]
   headers: string[]
   sheetTitle: string
-  /** シートが MAX_IMPORT_ROWS を超えて切り捨てられたか(一覧・import は注記を出す) */
+  /** シートが MAX_IMPORT_ROWS を超えて切り捨てられたか(取り込みは注記を出す) */
   truncated: boolean
   /** code が空でスキップされた行数 / 行フィルタで除外した行数 */
   skipped: number
@@ -43,29 +44,11 @@ export async function datasetFromSource(event: H3Event, source: SyncSource): Pro
 }
 
 /**
- * API が受け取る sourceId の解決。
- * - 数値で渡された → そのソース(見つからなければ 400。削除されたソースへの操作を黙って通さない)
- * - 未指定 → 有効な最初のソース(画面がソース未選択の SSR でも動く)。行が無ければ 400 で案内
- * 理由コード(`dataset_not_found` / `dataset_missing`)は `data.reason` に載る。日本語の案内は
+ * sourceId を厳密に解決する(フォールバックしない)。取り込み・書き込み側は「どのデータセットの作業か」
+ * を必ず受け取る — 未指定で別のシートに書かないためのガード。
+ * 理由コード(`dataset_not_found` / `source_id_required`)は `data.reason` に載る。日本語の案内は
  * `message`(body)に載せ、`statusMessage` は ASCII のコードだけ(HTTP status line は ASCII 限定)。
  */
-export async function resolveSource(event: H3Event, raw: unknown): Promise<SyncSource> {
-  const id = typeof raw === 'number' ? raw : Number(raw)
-  if (Number.isInteger(id) && id > 0) {
-    const found = await findSourceOrNull(event, id)
-    if (!found) {
-      throw apiFailure(400, { reason: 'dataset_not_found', sourceId: id }, 'データセットが見つかりません(削除されたまたは未作成)')
-    }
-    return found
-  }
-  const fallback = await firstSource(event)
-  if (!fallback) {
-    throw apiFailure(400, { reason: 'dataset_missing' }, 'データセットが未設定です(/sync でスプレッドシートを追加してください)')
-  }
-  return fallback
-}
-
-/** sourceId を厳密に解決する(フォールバックしない。取り込み・書き込み側)。 */
 export async function requireSource(event: H3Event, raw: unknown): Promise<SyncSource> {
   const id = typeof raw === 'number' ? raw : Number(raw)
   if (!Number.isInteger(id) || id <= 0) {

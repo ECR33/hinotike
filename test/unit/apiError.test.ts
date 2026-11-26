@@ -64,7 +64,7 @@ describe('describeApiError(スプレッドシート未設定)', () => {
   const payload: ApiErrorPayload = { reason: 'spreadsheet_not_configured', sourceId: 1, sourceName: '既定のシート' }
   const err = fetchErrorLike({
     // 実測の欠損文言(日本語だけが落ちる)
-    message: '[GET] "/api/items-list?limit=25&sourceId=1": 400 ' + sanitize(serverMessage),
+    message: '[GET] "/api/import?limit=25&sourceId=1": 400 ' + sanitize(serverMessage),
     status: 400,
     statusText: sanitize(serverMessage),
     data: { statusCode: 400, statusMessage: sanitize(serverMessage), message: serverMessage, data: payload },
@@ -76,13 +76,13 @@ describe('describeApiError(スプレッドシート未設定)', () => {
       'データセット "既定のシート" のスプレッドシート ID が未設定です。「同期」(/sync)でスプレッドシート ID を入力してください。',
     )
     expect(view.raw).toContain(serverMessage) // 欠損していないサーバの案内
-    expect(view.raw).toContain('/api/items-list?limit=25&sourceId=1') // dev のコンソールと突き合わせられる
+    expect(view.raw).toContain('/api/import?limit=25&sourceId=1') // dev のコンソールと突き合わせられる
   })
 
   it('データセット名が無いとき名を省略する', () => {
     const view = describeApiError(
       fetchErrorLike({
-        message: '[GET] "/api/items-list": 400 dataset_missing',
+        message: '[GET] "/api/import": 400 dataset_missing',
         status: 400,
         statusText: 'dataset_missing',
         data: { statusCode: 400, statusMessage: 'dataset_missing', message: 'データセットが未設定です', data: { reason: 'dataset_missing' } },
@@ -94,7 +94,7 @@ describe('describeApiError(スプレッドシート未設定)', () => {
   it('body に data が無い応答でも statusMessage の理由コードから復元する(nitro 既定の応答)', () => {
     const view = describeApiError(
       fetchErrorLike({
-        message: '[GET] "/api/items-list": 400 spreadsheet_not_configured',
+        message: '[GET] "/api/import": 400 spreadsheet_not_configured',
         status: 400,
         statusText: 'spreadsheet_not_configured',
       }),
@@ -120,10 +120,10 @@ describe('describeApiError(理由コードが未登録の API の失敗)', () =>
 
   it('401 はログイン、403 は権限の案内にする', () => {
     expect(
-      describeApiError(fetchErrorLike({ message: '[GET] "/api/items-list": 401 Not authenticated', status: 401 })).friendly,
+      describeApiError(fetchErrorLike({ message: '[GET] "/api/import": 401 Not authenticated', status: 401 })).friendly,
     ).toContain('ログインが必要です')
     expect(
-      describeApiError(fetchErrorLike({ message: '[GET] "/api/items-list": 403 Not registered', status: 403 })).friendly,
+      describeApiError(fetchErrorLike({ message: '[GET] "/api/import": 403 Not registered', status: 403 })).friendly,
     ).toContain('users テーブルに紐付け済みのユーザのみ')
   })
 
@@ -138,7 +138,7 @@ describe('describeApiError(カラム欠けとシート読み取り失敗)', () =
   it('code カラム欠けはカラム名を案内に載せ、ヘッダー一覧は詳細に載せる', () => {
     const view = describeApiError(
       fetchErrorLike({
-        message: '[GET] "/api/items-list": 400 code カラム がヘッダーにありません',
+        message: '[GET] "/api/import": 400 code カラム がヘッダーにありません',
         status: 400,
         statusText: 'code_column_missing',
         data: {
@@ -162,7 +162,7 @@ describe('describeApiError(カラム欠けとシート読み取り失敗)', () =
   it('シート読み取り失敗は ID と共有設定の案内 + Google の下情報を詳細に載せる', () => {
     const view = describeApiError(
       fetchErrorLike({
-        message: '[POST] "/api/lookup": 502 シート読み取り失敗',
+        message: '[POST] "/api/source-preview": 502 シート読み取り失敗',
         status: 502,
         statusText: 'sheet_read_failed',
         data: {

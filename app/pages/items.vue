@@ -19,12 +19,18 @@
  * そのまま復活させる(keepalive。複数の絞り込み結果を1件ずつ開いて確認する用途)。
  * 条件は URL に写らないので、画面更新(再SSR)では初期条件に戻る。
  *
+ * 一覧・年組の選択肢・項目キーは**すべて端末内のミラー(IndexedDB の取り込みデータ)**から解決する。
+ * server 側の items 照会 API(`/api/items-list` / `items-facets` / `items-keys`)は無くなったので、この画面は
+ * 通信の照会を組まない。SSR は storage を読めないため空で描画し、マウント後にミラーの判定へ切り替える。
+ * 未取り込みの端末には「この端末に取り込みしてください」の案内カードを出す(取り込みは「データの設定」(/sync))。
+ *
  * 年・組の絞り込み(折りたたみできる1つの欄)は2モード:
  *  - 単独選択: chip の多选択(app/components/FacetChipGroup.vue)。同一 facet 内は OR、年と組の間は AND。
  *  - 組み合わせ選択: 年×組のマトリクス(app/components/YearGroupMatrix.vue)。選んだセル(その年+その組)だけを対象、
  *    セル同士は OR。「1年3組 + 2年1組」のような**対応**を指定できる。
  * モード切替時はもう一方の選択を消す(見えない選択が条件に残らない)。
- * 選択肢は GET /api/items-facets(items 全体の値・ペアの件数)から読み、現在の絞り込み結果には連動しない。
+ * 選択肢は端末ミラーの全行から導出する(`shared/utils/offline` の `offlineFacets`。年・組の値とペアの件数)で、
+ * 現在の絞り込み結果には連動しない。
  * chip・セル・リセットはデバウンスを待たずに即適用する。
  * 入力の消去は app/components/ClearableInput.vue(Vuetify の clearable 相当: 値があるとき右端に消去ボタン)。
  *
@@ -34,18 +40,20 @@
  * 欄は閉じると1つのボタン行だけなので、条件領域は普段は大きくならない(閉じていても
  *  選択状態はトグルのラベルに出す)。有無ボタンは即適用、入力はデバウンス。
  *
- * 項目の絞り込み(折りたたみできる1つの欄)は**任意の payload キー**の条件(GET /api/items-keys が
- * 同期設定の候補キー + 実データスキャンで発見したキーを有無の件数・選択肢付きで返す)。
+ * 項目の絞り込み(折りたたみできる1つの欄)は**任意の payload キー**の条件。キーの発見は端末ミラーから行う
+ * (`shared/utils/offline` の `datasetKeys` が実データの payload に出現したキー + 取り込み時の定義スナップショット
+ * の「載る予定」キー(`configuredPayloadKeys`)を有無の件数・選択肢付きで出す)。
  * 備考欄と同じ有無のボタン(あり/なし、即適用)をキーごとに並び、選択肢が少ないキーは
  * chip で値の複数選択(同一キー内 OR)、部分一致は「項目の部分一致」のキーセレクト+入力で絞る。
  * 年・組・氏名・備考は専用の欄があるのでここには並べない(同じキーの二重コントロールを作らない)。
- * 設定に載る予定だがまだ出現していないキー(ボランティア欄の同期待ちなど)は件数0で注記付き出して消さない。
+ * 定義に載る予定だがまだ出現していないキー(ボランティア欄の同期待ちなど)は件数0で注記付き出して消さない。
  * キー同士・他の条件はすべて AND。条件は URL `?filters=キー|モード|値`(配列 or カンマ区切り)から初期化する。
- * `"` を含むキー・長さ上限超過のキーは検索不可(isFilterableKey=false。PostgREST の照会が安全に組めないため。
- * test/supabase/items-key-filter.test.ts で実挙動を固定)→ ボタン・chip・セレクトを disabled にして表示のみ扱う。
+ * `"` を含むキー・長さ上限超過のキーは条件にしない(isFilterableKey=false。条件の運搬は URL の
+ * `キー|モード|値` spec 文字列なので、キー名に区切り・引用符が混ざると共有リンクで復元できない。
+ * 長さ上限も parseKeyFilter と同じ規則)→ ボタン・chip・セレクトを disabled にして表示のみ扱う。
  *
  * 表示のみ(絞り込まない)もキーから選べる: 「行に表示する項目」の chip で選んだキーの値が
- * 一覧行(ItemRow の extra-keys)に追加される(payload は API がそのまま返すのでサーバー変更不要。
+ * 一覧行(ItemRow の extra-keys)に追加される(payload のキー名そのままなので照合側の変更不要。
  * localStorage に保存して再訪問でも残る。リセットでは消さない=表示設定は絞り込み条件ではない)。
  */
 import {
@@ -65,33 +73,16 @@ import {
   serializeKeyFilters,
   quantityName,
   type FacetOption,
-  type FacetPairCount,
   type ItemRowData,
   type ItemKeyEntry,
   type ItemsKeysResponse,
   type KeyFilter,
   type RemarkState,
 } from '#shared/utils/items'
-import { describeApiError } from '#shared/utils/apiError'
-import { mirrorBelongsToUser, offlineFacets, offlineItemsQuery, offlineKeys } from '#shared/utils/offline'
+import { configuredPayloadKeys, datasetKeys, mirrorBelongsToUser, offlineFacets, offlineItemsQuery, type OfflineFacets, type OfflineItemsPage } from '#shared/utils/offline'
 import { formatJst } from '#shared/utils/scan'
 import type { MeState } from '#shared/utils/auth'
 import type { OfflineItemRow } from '~/utils/offlineStore'
-
-interface ItemsPage {
-  rows: ItemRowData[]
-  nextCursor: string | null
-  total: number
-}
-
-interface ItemsFacets {
-  years: FacetOption[]
-  groups: FacetOption[]
-  pairs: FacetPairCount[]
-  missingPairs: number
-  scanned: number
-  truncated: boolean
-}
 
 /** 年・組の選択モード(単独選択は OR/AND、組み合わせ選択は年と組の対応)。 */
 type FacetMode = 'single' | 'pair'
@@ -183,39 +174,68 @@ const loading = ref(false)
 const pending = ref(false)
 const errorMessage = useState<string | null>('items-error', () => null)
 /**
- * 開発者向けの素のメッセージ(サーバの `message` + リクエスト行 + 下情報)。
- * 日本語の `statusMessage` は HTTP status line で h3 が ASCII に sanitize するため、
- * e.message だけを見ると `400 "" ID ()` のように欠ける。案内は `describeApiError` の
- * friendly(理由コード or body の message から作る)を使い、素の文言は折りたたみに出す。
+ * 開発者向けの素のメッセージ(端末ストレージの読み出し失敗の `message`)。
+ * 案内は日本語の文言を `errorMessage` に出し、素の文言は折りたたみに出す(運用者には案内だけ見える)。
  */
 const errorDetail = useState<string | null>('items-error-detail', () => null)
 
-/** 年・組の選択肢。SSR で解決して hydration に引き継ぐ(items 全体のスキャンなので条件に依存しない)。 */
-const facets = useState<ItemsFacets | null>('items-facets', () => null)
+/** 年・組の選択肢(端末ミラーの全行から導出。絞り込み条件には連動しない)。 */
+const facets = useState<OfflineFacets | null>('items-facets', () => null)
 const facetError = useState<string | null>('items-facets-error', () => null)
 
-/** 任意項目(payload キー)の発見結果(有無の件数・選択肢)。SSR で解決して hydration に引き継ぐ。 */
+/** 任意項目(payload キー)の発見結果(有無の件数・選択肢)。端末ミラーの payload + 取り込み時の定義から導出する。 */
 const keysState = useState<ItemsKeysResponse | null>('items-keys', () => null)
 const keysError = useState<string | null>('items-keys-error', () => null)
 
 /**
- * ローカルデータセット(/scan の「データの取り込み」で有効になる)。
+ * ローカルデータセット(/sync の「このスマホに取り込む」で有効になる)。
  * useOfflineState は onMounted で localStorage のメタを引き当てる(SSR は読めない)。
  * 一覧・facets・項目キーは端末内のミラー(**作業中のデータセット**の行)からローカルで解決する(通信しない)。
  */
-const { meta: offlineMeta, localWork, uidMismatch } = useOfflineState()
+const { meta: offlineMeta } = useOfflineState()
 /** 認証状態(SSR が埋め込む)。ミラーの uid と比較して別利用者の端末データの一覧表示を防ぐ。 */
 const authState = useState<MeState | null>('auth-state', () => null)
-/** 一覧・facets・項目キーの解決が端末ミラー由来か(注記の表示用)。 */
-const offlineLookup = ref(false)
+
+/**
+ * 端末ミラーの解決状態(一覧・facets・項目キーの解決可否)。
+ * SSR と初期 hydration は storage を読めないため `pending`(空の一覧と「この端末のデータを読み込んでいます…」を描画し、
+ * マウント後に実際の判定へ切り替える)。`missing` = 未取り込み・`foreign` = 別利用者の取り込み・
+ * `uidPending` = 取り込み済みだがログイン状態が未解決。
+ */
+type MirrorStatus = 'pending' | 'ready' | 'missing' | 'foreign' | 'uidPending'
+const mirrorStatus = useState<MirrorStatus>('items-mirror-status', () => 'pending')
+
+/** ミラーの判定(有効フラグ + uid 一致)を `mirrorStatus` に写す。マウントとメタ/認証の変化で打ち直す。 */
+function resolveMirrorStatus(): void {
+  const m = offlineMeta.value
+  if (!m || !m.enabled) {
+    mirrorStatus.value = 'missing'
+    return
+  }
+  if (!authState.value?.uid) {
+    // uid が解決できていない(通信が無い・認証状態が無い)ときは端末データを使わない(氏名を別ユーザに見せない)
+    mirrorStatus.value = 'uidPending'
+    return
+  }
+  mirrorStatus.value = mirrorBelongsToUser(m, authState.value?.uid) ? 'ready' : 'foreign'
+}
+
 /** ミラー全行のローカル缓存(ページ追記ごとに getAll を打ち直さない)。 */
 let offlineRowsCache: OfflineItemRow[] | null = null
-watch([localWork, () => offlineMeta.value?.snapshotAt, () => offlineMeta.value?.sourceId], () => {
-  offlineRowsCache = null // 解除・再取り込み・データセットの切替でミラーが変われば缓存を捨てる
-})
+/** 解除・再取り込み・データセットの切替・認証の解決でミラーが変われば缓存を捨て、判定も打ち直す。 */
+watch(
+  [() => offlineMeta.value?.snapshotAt, () => offlineMeta.value?.sourceId, () => offlineMeta.value?.enabled, () => authState.value?.uid],
+  () => {
+    offlineRowsCache = null
+    resolveMirrorStatus()
+    if (mirrorStatus.value === 'ready') void reloadAll()
+  },
+)
+
+/** 作業中のデータセットのミラー全行(未取り込みは [] = 照合しない)。 */
 async function offlineRowsAll(): Promise<OfflineItemRow[]> {
   const sourceId = offlineMeta.value?.sourceId
-  if (sourceId == null) return [] // 未取り込み = ローカル解決できない(API 側で解決する)
+  if (sourceId == null) return []
   if (!offlineRowsCache) offlineRowsCache = await offlineGetAllItems(sourceId)
   return offlineRowsCache
 }
@@ -248,19 +268,6 @@ const showKeyOptions = computed<FacetOption[]>(() =>
   genericKeys.value.map((entry) => ({ value: entry.key, count: entry.presentCount })),
 )
 
-/** SSR で解決した1ページ目は useState で hydration 時に引き継ぐ(再fetch防止)。初期条件が一致するものだけ再利用する。 */
-const cachedFirst = useState<{
-  code: string
-  name: string
-  years: string[]
-  groups: string[]
-  pairs: string[]
-  remark: string
-  remarkState: RemarkState
-  keyFilters: KeyFilter[]
-  page: ItemsPage
-} | null>('items-first-page', () => null)
-
 /** facet 選択の一致判定(順序は無視して集合として同じか。OR の選択順は結果に影響しない)。 */
 function sameSelection(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false
@@ -288,13 +295,16 @@ const ioSupported = ref(false)
 // 検索条件の変更で増やす番号。応答が自分の世代より古ければ捨てて上書きしない。
 let generation = 0
 
-async function load(opts: { reset: boolean; initial?: boolean }) {
+async function load(opts: { reset: boolean }) {
   if (opts.reset) {
     rows.value = []
     cursor.value = null
     done.value = false
   }
-  if (done.value) return
+  // 照会できる端末ミラーが無ければ行を追記しない(案内カードが理由を出す)。
+  // localMirrorActive は storage の同期読みでの再確認(メタの状態が後から変わった追記を止め、
+  // 解除された直後の追記が別利用者のミラーの氏名を出さない)。
+  if (done.value || mirrorStatus.value !== 'ready' || !localMirrorActive()) return
 
   const gen = generation
   const code = active.value.code
@@ -312,109 +322,65 @@ async function load(opts: { reset: boolean; initial?: boolean }) {
   errorMessage.value = null
   errorDetail.value = null
   try {
-    // この端末のデータで作業しているとき: /api/items-list を呼ばず、端末内のミラーから**同じ意味**で絞り込み+分页する
-    // (offlineItemsQuery は items-list の照合意味をローカルで再現する。localStorage は同期読みで
-    // generation の競合処理と組み合わせて「解除された直後の追記」がオンラインに戻るようにする)。
-    // uid 一致も条件: 別利用者が取り込んだミラーの氏名を一覧に出さない(通信の API 照会に戻る)。
-    const offline = localMirrorActive()
-    const page = offline
-      ? offlineItemsQuery(
-          await offlineRowsAll(),
-          {
-            code,
-            name,
-            years: selectedYears,
-            groups: selectedGroups,
-            pairs: selectedPairs,
-            remark,
-            remarkState: remarkStateApplied,
-            filters: serializeKeyFilters(keyFiltersApplied),
-            cursor: cur,
-            limit: ITEM_PAGE_SIZE,
-          },
-          ITEM_PAGE_SIZE,
-        )
-      : await $fetch<ItemsPage>('/api/items-list', {
-          // SSR の内部 fetch はブラウザ cookie を自動では持たないため useRequestHeaders で明示転送する。
-          query: {
-            code: code || undefined,
-            name: name || undefined,
-            years: selectedYears.length ? selectedYears : undefined,
-            groups: selectedGroups.length ? selectedGroups : undefined,
-            pairs: selectedPairs.length ? selectedPairs : undefined,
-            remark: remark || undefined,
-            // 条件なし(any)は送らない(URL を短く保つ。既定の状態は「送らない」と同じ)
-            remarkState: remarkStateApplied === 'any' ? undefined : remarkStateApplied,
-            // 任意項目の絞り込みは spec 文字列の配列で送る(値に `,` が混ざっても配列なら壊れない)
-            filters: keyFiltersApplied.length ? serializeKeyFilters(keyFiltersApplied) : undefined,
-            cursor: cur ?? undefined,
-            limit: ITEM_PAGE_SIZE,
-            // 作業中のデータセット(未指定は server が有効な最初のデータセットを選ぶ)
-            sourceId: activeSourceIdForRequest(),
-          },
-          headers: useRequestHeaders(['cookie']),
-        })
-    if (gen !== generation) return // 後発検索の応答が先に適用済みの場合はこの応答を捨てて上書きしない
-    rows.value = opts.reset ? page.rows : [...rows.value, ...page.rows]
-    cursor.value = page.nextCursor
-    total.value = page.total
-    done.value = page.nextCursor === null
-    offlineLookup.value = offline
-    if (opts.initial) {
-      cachedFirst.value = {
+    // 端末内のミラーから絞り込み+分页する(`offlineItemsQuery` が一覧の照合意味そのもの。
+    // キーセットカーソルは `code > cursor` の数値比較で、total は一致する総件数(exact))
+    const page: OfflineItemsPage = offlineItemsQuery(
+      await offlineRowsAll(),
+      {
         code,
         name,
         years: selectedYears,
         groups: selectedGroups,
         pairs: selectedPairs,
         remark,
+        // 条件なし(any)は照合側で無視される(送信条件の「送らない」と同じ意味)
         remarkState: remarkStateApplied,
-        keyFilters: keyFiltersApplied,
-        page,
-      }
-    }
+        // 任意項目の絞り込みは spec 文字列の配列で受け取る(値に `,` が混ざっても配列なら壊れない)
+        filters: serializeKeyFilters(keyFiltersApplied),
+        cursor: cur,
+        limit: ITEM_PAGE_SIZE,
+      },
+      ITEM_PAGE_SIZE,
+    )
+    if (gen !== generation) return // 後発検索の応答が先に適用済みの場合はこの応答を捨てて上書きしない
+    rows.value = opts.reset ? page.rows : [...rows.value, ...page.rows]
+    cursor.value = page.nextCursor
+    total.value = page.total
+    done.value = page.nextCursor === null
   } catch (e: unknown) {
     if (gen !== generation) return
-    const view = describeApiError(e)
-    errorMessage.value = view.friendly
-    errorDetail.value = view.raw || null
+    const raw = e instanceof Error ? e.message : String(e)
+    errorMessage.value = '端末内のデータの読み出しに失敗しました(IndexedDB が使えない・開けない環境です)'
+    errorDetail.value = raw
     done.value = true // 失敗した以上これ以上の追記はできない
   } finally {
     if (gen === generation) loading.value = false
   }
 }
 
-/** 年・組の選択肢を取得する(失敗しても一覧は出せるので facetError だけ立てる)。この端末のデータならミラーから導出する。 */
+/** 年・組の選択肢を端末ミラーの全行から導出する(失敗しても一覧は出せるので facetError だけ立てる)。 */
 async function loadFacets(): Promise<void> {
   facetError.value = null
   try {
-    if (localMirrorActive()) {
-      facets.value = offlineFacets(await offlineRowsAll())
-      return
-    }
-    facets.value = await $fetch<ItemsFacets>('/api/items-facets', {
-      query: { sourceId: activeSourceIdForRequest() },
-      headers: useRequestHeaders(['cookie']),
-    })
+    facets.value = offlineFacets(await offlineRowsAll())
   } catch (e: unknown) {
-    facetError.value = describeApiError(e).friendly
+    facetError.value = `端末内のデータの読み出しに失敗しました(${e instanceof Error ? e.message : String(e)})`
   }
 }
 
-/** 任意項目(payload キー)の発見結果を取得する(失敗しても一覧と他の欄は出せるので keysError だけ立てる)。この端末のデータならミラーの payload から導出する(定義由来の「載る予定」キーは出ない)。 */
+/**
+ * 任意項目(payload キー)の発見結果を端末ミラーから導出する(失敗しても一覧と他の欄は出せるので keysError だけ立てる)。
+ * 実データに出現したキー + 取り込み時の定義スナップショットの「載る予定」キー(`configuredPayloadKeys`)を出す
+ * (定義に載る予定だがまだ出現していないキーは件数0・注記付きで残す)。
+ */
 async function loadKeys(): Promise<void> {
   keysError.value = null
   try {
-    if (localMirrorActive()) {
-      keysState.value = offlineKeys(await offlineRowsAll())
-      return
-    }
-    keysState.value = await $fetch<ItemsKeysResponse>('/api/items-keys', {
-      query: { sourceId: activeSourceIdForRequest() },
-      headers: useRequestHeaders(['cookie']),
-    })
+    const all = await offlineRowsAll()
+    const meta = offlineMeta.value
+    keysState.value = datasetKeys(all, meta ? configuredPayloadKeys(meta.source) : [])
   } catch (e: unknown) {
-    keysError.value = describeApiError(e).friendly
+    keysError.value = `端末内のデータの読み出しに失敗しました(${e instanceof Error ? e.message : String(e)})`
   }
 }
 
@@ -647,60 +613,20 @@ async function loadMore(): Promise<void> {
 }
 
 /**
- * リクエストに送る**作業中のデータセット**の id。
- * - 取り込み済みならメタの sourceId(ローカル照合と同じシートを照会する)
- * - 未取り込みは localStorage の選択(/scan・/scan-settings で選んだもの)。未設定は undefined = server が有効な最初のデータセットを選ぶ
- * SSR は storage を読めないため undefined(= 既定のデータセット)。client のマウント後に選択データセットへ打ち直す。
+ * 端末ミラーから一覧・年組の選択肢・項目キーをまとめて解決し直す(マウントとメタ/認証の変化で走る)。
+ * 取り込みの切替や解除でミラーが変われば缓存 HTML の行とズれるので IDB から読み直す。
  */
-function activeSourceIdForRequest(): number | undefined {
-  if (!import.meta.client) return undefined
-  const meta = readOfflineMetaFromStorage()
-  // 取り込み済みでも **uid 一致**の時だけメタの sourceId を使う(別利用者のミラーのシートを照会しない)
-  if (meta?.enabled && mirrorBelongsToUser(meta, authState.value?.uid)) return meta.sourceId
-  return readActiveSourceFromStorage() ?? undefined
-}
-
-/**
- * この端末のデータで作業しているとき、hydration で引き継いだ**オンライン時の缓存**(1ページ目・facets・項目キー)を
- * 端末内のデータ由来に打ち直す。缓存 HTML のデータは取り込み時点とズレていることがあるので IDB から読み直してから追記を続ける。
- */
-async function reloadOffline(): Promise<void> {
-  try {
-    const all = await offlineRowsAll()
-    facets.value = offlineFacets(all)
-    facetError.value = null
-    keysState.value = offlineKeys(all)
-    keysError.value = null
-    offlineLookup.value = true
-  } catch {
-    // IDB が無い・壊れている場合 facets/keys は缓存のまま。load のローカル分岐が errorMessage を出す。
-  }
-  await load({ reset: true, initial: true })
-}
-
-/** 未取り込みだが選択データセットがあるとき、SSR が既定のデータセットで解いた1ページ目を選び直したデータセットで打ち直す。 */
-async function reloadForSelectedSource(): Promise<void> {
-  await load({ reset: true, initial: true })
+async function reloadAll(): Promise<void> {
+  await load({ reset: true })
   await loadFacets()
   await loadKeys()
 }
 
-// uid が後から解決される(缓存 HTML を開いた等で auth-state が未解決)場合、ミラー由来の解決に切り替える。
-watch(localWork, (ok) => {
-  if (ok) void reloadOffline()
-})
-
 onMounted(() => {
   ioSupported.value = typeof IntersectionObserver === 'function'
-  if (localWork.value) {
-    void reloadOffline()
-  } else if (offlineMeta.value?.enabled) {
-    // ミラーがあるが uid が一致しない(別利用者のデータ)・uid 未解決: 通信の照会を読み直す(API は登録ユーザのシートを読む)
-    void reloadForSelectedSource()
-  } else if (readActiveSourceFromStorage() !== null) {
-    // SSR は storage を読めない(既定のデータセットで解く)。選中のデータセットがあれば打ち直す。
-    void reloadForSelectedSource()
-  }
+  // SSR は storage を読めない(『読み込み中…』を描画)。マウントでこの端末のミラーの判定へ切り替えて解決する。
+  resolveMirrorStatus()
+  if (mirrorStatus.value === 'ready') void reloadAll()
   // 行に表示するキーを localStorage から復元(表示設定。URL の初期指定があればそちらを優先する)。
   if (!showKeys.value.length) {
     try {
@@ -769,39 +695,20 @@ if (import.meta.client) {
   })
 }
 
-// 1ページ目と年・組の選択肢を SSR で解決して hydration に引き継ぐ(再fetch 防止)。
-// 1ページ目は初期条件が一致する缓存だけ再利用する(別条件の缓存を今の条件で使うと別の結果になる)。
-const reuseFirstPage =
-  !!cachedFirst.value &&
-  sameCondition(cachedFirst.value, {
-    code: initialCode,
-    name: initialName,
-    years: initialYears,
-    groups: initialGroups,
-    pairs: initialPairs,
-    remark: initialRemark,
-    remarkState: initialRemarkState,
-    keyFilters: initialKeyFilters,
-  })
-
-if (reuseFirstPage && cachedFirst.value) {
-  const page = cachedFirst.value.page
-  rows.value = page.rows
-  total.value = page.total
-  cursor.value = page.nextCursor
-  done.value = page.nextCursor === null
-}
-
-const initialLoads: Promise<void>[] = []
-if (!facets.value) initialLoads.push(loadFacets())
-if (!keysState.value) initialLoads.push(loadKeys())
-if (!reuseFirstPage) initialLoads.push(load({ reset: true, initial: true }))
-await Promise.all(initialLoads)
+// 解決は client のマウントで走る(SSR は端末の storage を読めないため空で描画し、マウント後に
+// 端末ミラーから一覧・年組の選択肢・項目キーを埋める)。未取り込みの端末には案内カードを出す。
 </script>
 
 <template>
   <div class="page">
     <h1>レコード一覧</h1>
+
+    <!-- 端末ミラーが無い端末: 一覧・選択肢・項目はすべて端末内のデータから出すので、取り込みを案内する -->
+    <div v-if="mirrorStatus === 'missing'" class="card">
+      <p class="muted">
+        この端末に取り込み済みのデータがありません。「データの設定」(/sync)でデータセットを選んで「このスマホに取り込む」を実行してください(一覧・年組の選択肢・項目の選択肢は端末内のデータから出します)。
+      </p>
+    </div>
 
     <div class="card">
       <div class="search-row">
@@ -907,8 +814,8 @@ await Promise.all(initialLoads)
           </template>
 
           <p class="muted hint">
-            <span v-if="facetError">選択肢を取得できませんでした({{ facetError }})</span>
-            <span v-else-if="facets?.truncated">選択肢は先頭 {{ facets.scanned }} 件の範囲から生成しています</span>
+            <span v-if="facetError">選択肢を読み出せませんでした({{ facetError }})</span>
+            <span v-else>年・組の値は取り込み済みの全レコードから生成しています(現在の絞り込み結果には連動しません)</span>
           </p>
         </div>
 
@@ -951,7 +858,7 @@ await Promise.all(initialLoads)
 
         <!-- 項目の欄: 任意の payload キー(ボランティア欄など同期で載る項目)ごとの有無ボタン + 値 chip + 部分一致1キー + 表示のみトグル -->
         <div id="key-panel" v-show="keySectionOpen" class="key-panel">
-          <p v-if="keysError" class="muted hint">項目の一覧を取得できませんでした({{ keysError }})</p>
+          <p v-if="keysError" class="muted hint">項目の一覧を読み出せませんでした({{ keysError }})</p>
           <template v-else>
             <div v-for="entry in genericKeys" :key="entry.key" class="key-row">
               <div class="key-head">
@@ -990,15 +897,12 @@ await Promise.all(initialLoads)
                 @toggle="(value: string) => toggleKeyValue(entry.key, value)"
               />
               <p v-else-if="!isFilterableKey(entry.key)" class="muted hint">
-                このキーは `"` を含むか長さ上限を超えており、検索での絞り込みはできません(PostgREST の照会が安全に組めないため。行への表示のみ可能です)。
+                このキーは `"` を含むか長さ上限を超えており、絞り込みの条件にできません(条件の運搬は URL の `キー|モード|値` の spec 文字列なので、キー名に区切りや引用符が混ざると共有リンクで復元できません。行への表示のみ可能です)。
               </p>
               <p v-else-if="entry.options.length > KEY_CHIP_MAX" class="muted hint">
                 値の選択肢が {{ entry.options.length }} 件あるため chip 選択はしません(下の部分一致で絞れます)。
               </p>
             </div>
-            <p v-if="keysState?.truncated" class="muted hint">
-              項目の発見は先頭 {{ keysState.scanned }} 件の範囲から行っています(それ以降のキーは出ていない場合があります)。
-            </p>
 
             <!-- 部分一致: 対象キーを1つ選んで語で絞る(語は code・氏名と同じデバウンス、キーセレクトは即適用) -->
             <div class="contains-row">
@@ -1043,15 +947,19 @@ await Promise.all(initialLoads)
         </button>
       </div>
       <p class="muted status" aria-live="polite">
-        <span v-if="pending">検索中…</span>
+        <span v-if="mirrorStatus === 'pending'">この端末のデータを読み込んでいます…</span>
+        <span v-else-if="pending">検索中…</span>
         <span v-else-if="loading">読み込み中…</span>
         <span v-else>{{ total }} 件中 {{ rows.length }} 件表示</span>
       </p>
-      <p v-if="offlineLookup" class="muted offline-note">
-        この端末のデータ({{ offlineSnapshotLabel }})から一覧を表示しています。シートが正なので、取り込み後にシート側で変わった値は次の取り込みまで現れません。年・組・項目の選択肢もこの端末のデータから生成しています(取り込み定義に載る予定の項目は次の取り込みで現れます)。
+      <p v-if="mirrorStatus === 'ready'" class="muted offline-note">
+        この端末のデータ({{ offlineSnapshotLabel }})から一覧を表示しています。シートが正なので、取り込み後にシート側で変わった値は次の取り込みまで現れません。年・組・項目の選択肢もこの端末のデータから生成しています(取り込み時の定義に載る予定で、まだ出現していない項目は件数0で出ます)。
       </p>
-      <p v-if="uidMismatch" class="error">
-        この端末のデータは別の利用者が取り込んだものです(氏名・備考を含むため一覧には出しません)。通信の照会を読み直しています。
+      <p v-if="mirrorStatus === 'foreign'" class="error">
+        この端末のデータは別の利用者が取り込んだものです(氏名・備考を含むため一覧には出しません)。この利用者として取り込みし直すか、「データの設定」(/sync)で端末のデータを削除してください。
+      </p>
+      <p v-if="mirrorStatus === 'uidPending'" class="muted offline-note">
+        取り込み済みのデータがありますがログイン状態が解決できていないため、この画面では端末内のデータを使いません(ログインしてから開いてください)。
       </p>
     </div>
 
@@ -1069,7 +977,8 @@ await Promise.all(initialLoads)
       <ul v-if="rows.length" class="item-list">
         <ItemRow v-for="item in rows" :key="item.code" :item="item" :extra-keys="showKeys" />
       </ul>
-      <p v-else-if="loading || pending" class="muted">読み込み中…</p>
+      <p v-else-if="loading || pending || mirrorStatus === 'pending'" class="muted">読み込み中…</p>
+      <p v-else-if="mirrorStatus !== 'ready'" class="muted">この端末のデータから一覧を出していません(上の案内)</p>
       <p v-else-if="!errorMessage" class="muted">該当するレコードがありません。</p>
 
       <!-- 追記のトリガー(常に描画して observer の対象を固定する)。0件のとき「最後まで」は出さない -->

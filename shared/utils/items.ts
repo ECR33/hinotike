@@ -1,5 +1,5 @@
 /**
- * code + payload の1行(シート由来)の一覧表示・検索の共通ロジック。
+ * code + payload の1行の一覧表示・検索の共通ロジック。
  *
  * payload のキー名は**取り込み定義**(public.sync_sources の include_columns / rename。
  * 既定のシードは shared/utils/sync.ts の DEFAULT_SOURCE と migrations/0007 の行)と一致させること。
@@ -7,12 +7,13 @@
  * /sync のデータセット設定で同じキーに合わせる。
  * 商品(個数系キー)の表示順は productOrderKeys で、データセットの includeColumns の並びが正
  * (/sync の「取り込みカラム」の行順をアプリから調整できる)。
- * 行の正は Google スプレッドシート(Supabase の items テーブルは使わない)。照合は
- * server(/api/items-* = シート読み取り)と画面(shared/utils/offline.ts = 端末ミラー)で同じ実装を使う。
+ * 行の正は Google スプレッドシートで、**一覧・照合は端末内のミラー**(IndexedDB)が読む
+ * (shared/utils/offline.ts がこの形状を server の取り込み応答と画面の両方で使う)。
+ * データ本体を置く Supabase テーブルは無い(旧 `items` は 0009 で drop した)。
  * Nuxt 依存の import は置かない(server / shared どちらでも読めるように)。
  */
 
-/** 一覧の1行(API が items 行そのままを渡す最小形状)。行部品は payload をそのまま受け取る。 */
+/** 一覧の1行の最小形状(取り込み応答と端末ミラーの行が同じ形)。行部品は payload をそのまま受け取る。 */
 export interface ItemRowData {
   code: string
   payload: Record<string, unknown>
@@ -50,7 +51,7 @@ export function normalizeRemarkState(raw: unknown): RemarkState {
 }
 
 /**
- * 「任意の payload キーがなし」の意味(ローカル・サーバーどちらの照合もこの規則で読む)。
+ * 「任意の payload キーがなし」の意味(端末ミラーの照合がこの規則で読む)。
  * キーが無い行(null・undefined)と空文字の行の両方を「なし」に含める。
  * 空白のみの値は trim できないため「あり」側に残る(取り込みは空値を載せず、備考の保存は trim するので通常起きない)。
  */
@@ -94,9 +95,8 @@ export const KEY_NAME_MAX_LENGTH = 40
 
 /**
  * payload キー名が絞り込み条件に使えるか。
- * キー名に `"` が混ざると PostgREST/supabase-js の絞り込みが安全に組めない(統合テストで実挙動を固定:
- * `.or()` は論理木パースエラー、パス照会は暗黙に 0 件になる)。シートヘッダー由来の任意キー名で
- * `"` を含むキーは**表示のみ**に制限する(GET /api/items-keys はそのまま返すので表示側は使える)。
+ * キー名に `"` を含むキーは**表示のみ**に制限する(旧 PostgREST 照会での安全規則の名残。キー名の
+ * 規則を一箇所に決めておくと、取り込み定義・表示・絞り込みが同じキー集合を読む)。
  * 長さ上限(KEY_NAME_MAX_LENGTH)を超えるキーも条件にしない(parseKeyFilter と同じ規則)。
  */
 export function isFilterableKey(key: string): boolean {
@@ -175,7 +175,7 @@ export function sameKeyFilters(a: KeyFilter[], b: KeyFilter[]): boolean {
 }
 
 /**
- * GET /api/items-keys の1項目ぶん(key 発見 + 有無の件数 + 値の選択肢)。
+ * 「任意項目」絞り込み・表示の1項目ぶん(key 発見 + 有無の件数 + 値の選択肢)。
  * absentCount = スキャン行数 - presentCount(欠落・null・空文字を「なし」とする)。
  * fromConfig = 同期設定(includeColumns/rename)由来の候補、seenInData = スキャンした行に実際に出現。
  * 設定由来でまだ出現していないキー(同期待ち)は presentCount=0 / seenInData=false で出る。
@@ -189,7 +189,7 @@ export interface ItemKeyEntry {
   seenInData: boolean
 }
 
-/** GET /api/items-keys の応答。scanned / truncated は payload のスキャン範囲(items-facets と同じ上限)。 */
+/** 「任意項目」の応答。scanned / truncated は payload のスキャン範囲(facet と同じ上限)。 */
 export interface ItemsKeysResponse {
   keys: ItemKeyEntry[]
   scanned: number
@@ -232,21 +232,6 @@ export function productOrderKeys(includeColumns: string[], rename: Record<string
   return out
 }
 
-/**
- * jsonb の文字列値をカラムとして参照する PostgREST のパス表記(payload ->> key)。
- * キーに空白や非ASCIIが混ざっても通るように引用符で囲む。
- * キー名自体の `"` は SQL の引用規則通り2個重ねて守る(汎用キー絞り込みでは任意文字列のキー名を
- * シートヘッダー由来で受け取るため、`"` を含むキーでパスが壊れないようにする)。
- */
-export function payloadTextColumn(key: string): string {
-  return `payload->>"${escapePayloadKey(key)}"`
-}
-
-/** payload キー名の引用内エスケープ(`"` → `""`)。payloadTextColumn のパス組み立てで使う。 */
-export function escapePayloadKey(key: string): string {
-  return key.replace(/"/g, '""')
-}
-
 /** payload のキーから表示用の文字列値を取り出す(欠落・null は空文字)。 */
 export function payloadValue(payload: Record<string, unknown> | null | undefined, key: string): string {
   const v = payload?.[key]
@@ -267,22 +252,6 @@ export function normalizeFilter(raw: unknown): string | null {
   return trimmed.slice(0, SEARCH_FILTER_MAX_LENGTH)
 }
 
-/**
- * PostgREST の ilike/like はパターン側で `%` `_`(とエスケープの `\`)が特殊文字になる。
- * 入力に含まれる これらをリテラルとして扱うため `\` で守る(氏名/コードに `%` が混ざっても
- * 「任意文字」扱いにならない)。
- */
-export function escapeIlikePattern(value: string): string {
-  return value.replace(/[\\%_]/g, (c) => `\\${c}`)
-}
-
-/** 部分一致(包含)パターン。空入力は null を返す(条件を追加しない)。 */
-export function containsPattern(raw: unknown): string | null {
-  const value = normalizeFilter(raw)
-  if (!value) return null
-  return `%${escapeIlikePattern(value)}%`
-}
-
 /** 一覧のページサイズ(スクロール追記の1バッチ)。API はこれを上限内で補正する。 */
 export const ITEM_PAGE_SIZE = 25
 export const ITEM_PAGE_SIZE_MAX = 100
@@ -295,8 +264,8 @@ export function clampLimit(raw: unknown): number {
 }
 
 /**
- * 次のページカーソル。code は PK なので code 昇順キーセット(page の末尾 code より大きい分を次取得)で
- * 安定して paginate できる。offset と違い検索条件の変更でズレ・重複しない。
+ * 次のページカーソル。code 昇順のキーセット(page の末尾 code より大きい分を次取得)で安定して
+ * paginate できる。offset と違い絞り込みの変更でズレ・重複しない(端末ミラーの絞り込みがこれを使う)。
  * 末尾が limit に満たない = 最終ページ(null)。
  */
 export function nextCursor(rows: ItemRowData[], limit: number): string | null {
@@ -305,12 +274,12 @@ export function nextCursor(rows: ItemRowData[], limit: number): string | null {
 }
 
 /**
- * 年・組の絞り込み。
+ * 年・組の絞り込みの選択肢。
  *
  * 値は payload のキー(ITEM_YEAR_KEY / ITEM_GROUP_KEY)の文字列そのものを使う。
- * 同一 facet 内の複数選択は OR(`in.(...)`)、facet 同士(年×組)は AND にする。
+ * 同一 facet 内の複数選択は OR、facet 同士(年×組)は AND にする(照合の実装は shared/utils/offline.ts)。
  * 「1年3組 と 2年1組」のような年と組の**対応**は chip では表現できないため、
- * ペア指定(FacetPair / pairConditions → or(and(...),and(...)))を別に用意する。
+ * ペア指定(FacetPair / normalizePairs)を別に用意する。
  */
 export interface FacetOption {
   value: string
@@ -320,9 +289,6 @@ export interface FacetOption {
 /** facet 選択の上限(大量の in.() 値による高コスト照合を防ぐ)。選択肢側もこの上限内に収める。 */
 export const FACET_MAX_VALUES = 12
 export const FACET_VALUE_MAX_LENGTH = 24
-
-/** facet(選択肢)生成のため payload の年・組だけスキャンする上限。超過は truncated を返す。 */
-export const ITEM_FACET_SCAN_LIMIT = 2000
 
 /**
  * クエリパラメータの選択値(単数 or 複数)を正規化して重複を除く。
@@ -339,14 +305,6 @@ export function normalizeSelection(raw: unknown): string[] {
     if (seen.size >= FACET_MAX_VALUES) break
   }
   return [...seen]
-}
-
-/**
- * PostgREST の `in.()` はカンマ区切りで、値に `,` `"` `(` などの特殊文字が混ざると引用が必要。
- * 値を SQL 風のダブルクォートで守る(`"` は `""` に重ねる)。supabase-js はこの文字列をそのまま組み立てる。
- */
-export function quoteInValue(value: string): string {
-  return `"${value.replace(/"/g, '""')}"`
 }
 
 /** facet 値の順序: 数字だけ数字順(1,2,10)、それ以外は比較順。欠落(null)は呼ばない側で除く。 */
@@ -417,24 +375,6 @@ export function normalizePairs(raw: unknown): FacetPair[] {
     if (pairs.length >= ITEM_PAIR_MAX) break
   }
   return pairs
-}
-
-/**
- * ペア選択を PostgREST の論理木にする。supabase-js の `.or()` は `or=(...)` で包むので、
- * ここでは `and(...),and(...)` の並列だけ返す(空選択は ''。呼ばない側でフィルタを適用しない)。
- * nested は `and=(...)` ではなく `and(...)` の形が必要。パス・値は引用して特殊文字を防ぐ。
- */
-export function pairConditions(
-  pairs: FacetPair[],
-  yearKey = ITEM_YEAR_KEY,
-  groupKey = ITEM_GROUP_KEY,
-): string {
-  return pairs
-    .map(
-      (pair) =>
-        `and(${payloadTextColumn(yearKey)}.eq.${quoteInValue(pair.year)},${payloadTextColumn(groupKey)}.eq.${quoteInValue(pair.group)})`,
-    )
-    .join(',')
 }
 
 /** ペア(年・組の両方を持つ行)の件数。どちらかが欠ける行は数えない(マトリクスで選べない)。年→組の昇順。 */

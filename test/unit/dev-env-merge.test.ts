@@ -31,7 +31,6 @@ describe('mergeDevEnv', () => {
       'GOOGLE_SPREADSHEET_ID=1abc',
       NUXT_LINE('SUPABASE_URL', 'http://localhost:54320'),
       NUXT_LINE('SUPABASE_SECRET_KEY', 'sb_secret_old'),
-      'SUPABASE_TABLE_NAME=items',
       '',
     ].join('\n')
 
@@ -42,7 +41,6 @@ describe('mergeDevEnv', () => {
     expect(joined).toContain('GOOGLE_SPREADSHEET_ID=1abc')
     expect(joined).toContain('DEV_ALLOWED_HOSTS=example.jp')
     expect(joined).toContain('NUXT_PUBLIC_APP_URL=')
-    expect(joined).toContain('SUPABASE_TABLE_NAME=items')
 
     expect(joined).toContain('NUXT_PUBLIC_SUPABASE_URL=http://localhost:54321')
     expect(joined).toContain('NUXT_PUBLIC_SUPABASE_KEY=sb_publishable_new')

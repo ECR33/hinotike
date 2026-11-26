@@ -27,6 +27,21 @@ function matrixData(text) {
   return data
 }
 
+// シートの行を /api/import の分页で読む(server の照会APIは撤去した。取り込み応答が唯一の sheet 読み)。
+async function sheetRows(pg, maxPages = 10) {
+  return pg.evaluate(async (pages) => {
+    const rows = []
+    let cursor = 0
+    for (let i = 0; i < pages; i++) {
+      const j = await (await fetch(`/api/import?limit=200&cursor=${cursor}`)).json()
+      rows.push(...(j.rows ?? []))
+      if (!j.nextCursor) break
+      cursor = Number(j.nextCursor)
+    }
+    return rows
+  }, maxPages)
+}
+
 const browser = await chromium.launch({
   executablePath: '/usr/bin/google-chrome',
   headless: true,
@@ -104,11 +119,10 @@ try {
 
   // 実在する code と氏名を**作業中のデータセット**から選ぶ(ハードコードせず dev データに追随する)。
   // 来場済=済 の行は dedupe で確定がスキップになるので、未記録の行を選ぶ(実行を反復できる)。
-  const picked = await page.evaluate(async () => {
-    const j = await (await fetch('/api/items-list?limit=100')).json()
-    const row = (j.rows ?? []).find((r) => r.payload?.['来場済'] !== '済')
-    return row ? { code: String(row.code), name: row.payload?.['氏名'] ?? null, sourceId: j.sourceId ?? null } : null
-  })
+  const rows = await sheetRows(page)
+  const picked = rows.find((r) => r.payload?.['来場済'] !== '済')
+    ? { code: String(rows.find((r) => r.payload?.['来場済'] !== '済').code), name: rows.find((r) => r.payload?.['来場済'] !== '済').payload?.['氏名'] ?? null }
+    : null
   if (!picked?.code) {
     failures.push('データセットにコードが無い(/sync でスプレッドシートを定義し、シートに data があること)')
   } else {
@@ -249,21 +263,13 @@ try {
       console.log(`確定: ${note.replace(/\s+/g, ' ').slice(0, 180)}`)
       if (!note.includes('1件をシートに書き込みました')) failures.push('確定で 1件が書き込まれない')
 
-      // 記録後の状態を API で読む(シート値の往復が端末での読み取り日時で載る)
-      const check = await page.evaluate(async (code) => {
-        const cfg = await (await fetch('/api/scan-config')).json()
-        const modeId = cfg.modes.find((m) => m.name === 'チェックイン')?.id
-        if (!modeId) return { modeId: null }
-        const j = await (await fetch('/api/scan-check', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ modeId, code }),
-        })).json()
-        return { modeId, state: j.state, recordedAt: j.recordedAt }
-      }, CODE)
+      // 記録後の状態を**シートから**読む(確定で flush がシート索引のキャッシュを打ち直しているので再読は新値)。
+      // server の照合 API(/api/scan-check)は撤去したため、取り込み応答の payload で済/未と日時を見る。
+      const after = (await sheetRows(page)).find((r) => String(r.code) === CODE)
+      const check = { state: after?.payload?.['来場済'] ?? null, recordedAt: after?.payload?.['来場日時'] ?? null }
       console.log(`記録後の状態: ${JSON.stringify(check)}`)
       if (check.state !== '済') failures.push('復旧確定後の状態が済にならない')
-      if (!check.recordedAt) failures.push('復旧後の記録日時が載らない')
+      if (!check.recordedAt) failures.push('復旧後の記録日時がシートに載らない')
 
       // 証跡 scan_events(/records)に端末での読み取り時刻(at)がそのまま残る
       await page.goto(`${base}/records`, { waitUntil: 'networkidle' })

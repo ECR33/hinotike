@@ -6,7 +6,7 @@
 //
 // 注意: 確認モードは記録ボタンで即 flush するので、**設定されたスプレッドシートに 来場済 / 来場日時 を書く**。
 // ローカルの dev シート(scripts/service-account.json が指す ID)に対してだけ実行すること。
-// /api/scan-check で状態を読むので、列がシートに存在する必要がある(`/scan-settings` で列を追加する)。
+// 記録後の状態は /api/import でシートを読むので、列がシートに存在する必要がある(`/scan-settings` で列を追加する)。
 // 390x640 に落としてから流れを確認カードのレイアウトも見る: 確認カードはカメラ枠の内側下部に
 // 被せるので、枠の中に収まり bottom-nav 上に見え、ボタンが押せることまで断言している。
 import { chromium } from 'playwright-core'
@@ -23,6 +23,21 @@ function matrixData(text) {
   const data = []
   for (let y = 0; y < m.getHeight(); y++) for (let x = 0; x < m.getWidth(); x++) data.push(m.get(x, y) ? 1 : 0)
   return data
+}
+
+// シートの行を /api/import の分页で読む(server の照会APIは撤去した。取り込み応答が唯一の sheet 読み)。
+async function sheetRows(pg, maxPages = 10) {
+  return pg.evaluate(async (pages) => {
+    const rows = []
+    let cursor = 0
+    for (let i = 0; i < pages; i++) {
+      const j = await (await fetch(`/api/import?limit=200&cursor=${cursor}`)).json()
+      rows.push(...(j.rows ?? []))
+      if (!j.nextCursor) break
+      cursor = Number(j.nextCursor)
+    }
+    return rows
+  }, maxPages)
 }
 
 const browser = await chromium.launch({
@@ -145,20 +160,10 @@ try {
     .catch(() => failures.push('記録(flush)の注記が出ない'))
   console.log(`flush 注記: ${(await page.textContent('body').catch(() => '')).match(/\d+件をシートに書き込みました[^※]*/)?.[0] ?? ''}`)
 
-  // 記録された状態(payload から正規化した済/未)を API で読む
-  const check = await page.evaluate(async (code) => {
-    const cfg = await (await fetch('/api/scan-config')).json()
-    const modeId = cfg.modes.find((m) => m.name === 'チェックイン')?.id
-    if (!modeId) return { modeId: null }
-    const j = await (await fetch('/api/scan-check', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ modeId, code }),
-    })).json()
-    return { modeId, state: j.state, recordedAt: j.recordedAt }
-  }, CODE)
+  // 記録された状態を**シートから**読む(server の照合 API は撤去した。flush がシート索引を打ち直すので再読は新値)
+  const after = (await sheetRows(page)).find((r) => String(r.code) === CODE)
+  const check = { state: after?.payload?.['来場済'] ?? null, recordedAt: after?.payload?.['来場日時'] ?? null }
   console.log(`記録後の状態: ${JSON.stringify(check)}`)
-  if (check.modeId === null) failures.push('チェックインのモードが見つからない')
   if (check.state !== '済') failures.push('記録後の状態が済にならない')
   if (!check.recordedAt) failures.push('記録日時が載らない')
 

@@ -29,10 +29,11 @@ import { updateSource } from './syncRun'
  * スキャンの記録実行側(モードの読み書き・シート索引・記録書き込み・証跡)。
  * すべての Supabase アクセスはユーザセッションの client を通す(権限は RLS が握る。Secret key は使わない)。
  *
- * 2026-11-22 の複数データセット化:
+ * 2026-11-22 の複数データセット化 + 2026-11-26 のレガシーテーブル撤去:
  * - 対象シートは `SyncSource`(public.sync_sources の行)で決まる。モードは 1ソースに紐づく(`source_id`)。
- * - 氏名・済/未の正は**シートの値**(`payloadIndex`)。Supabase の `items` テーブルは読まないし書かない。
- *   flush はシートへ書いてから証跡 `scan_events` に残す(シートが唯一の正なので2段整合は無い)。
+ * - 氏名・済/未の正は**シートの値**(`payloadIndex`)。データ本体を置くテーブルは Supabase に無い
+ *   (旧 `items` テーブルは 0009 で drop した)。flush はシートへ書いてから証跡 `scan_events` に残す
+ *   (シートが唯一の正なので2段整合は無い)。
  * - 端末内のミラー(IndexedDB)への反映は画面側が flush 応答の `written` を写す(サーバーは端末に触らない)。
  */
 
@@ -320,15 +321,7 @@ export function resolveActionColumns(mode: ScanMode, index: SheetIndex): { colId
   }))
 }
 
-// ── 記録の照合(check: 書き込まない)──────────────────────
-
-export interface ScanCheckResult {
-  status: ScanStatus
-  name: string | null
-  state: '済' | '未'
-  recordedAt: string
-  found: boolean
-}
+// ── シート値からの1行照会 ─────────────────────────────────
 
 /** シート値(payloadIndex)からの1行照会。氏名は payload の固定キー。 */
 export function sheetRowOf(index: SheetIndex, code: string): { payload: Record<string, string>; name: string | null } | null {
@@ -339,27 +332,11 @@ export function sheetRowOf(index: SheetIndex, code: string): { payload: Record<s
 }
 
 // stateOfPayload(payload から済/未と記録日時を出す)は #shared/utils/scan に集約した
-// (ローカル check と同じ根で済/未を出すため)。
+// (端末ミラーの照合と同じ根で済/未を出すため)。
 
-/** check(読み取り専用)。シート値 → 現在の状態。書き込まない。 */
-export async function checkScanCode(
-  event: H3Event,
-  mode: ScanMode,
-  source: SyncSource,
-  code: string,
-): Promise<ScanCheckResult> {
-  const index = await loadSheetIndex(event, source)
-  const row = sheetRowOf(index, code)
-  const found = row !== null
-  if (!found && mode.requireFound) {
-    return { status: 'not_found', name: null, state: '未', recordedAt: '', found: false }
-  }
-  if (!index.rowIndex.has(code)) {
-    return { status: 'sheet_missing', name: row?.name ?? null, state: '未', recordedAt: '', found }
-  }
-  const { state, recordedAt } = stateOfPayload(row?.payload ?? {}, mode)
-  return { status: state === '済' ? 'duplicate' : 'ok', name: row?.name ?? null, state, recordedAt, found }
-}
+// 読み取り専用の check(シート値 → 現在の状態)の API は撤去した(`/api/scan-check`)。
+// スキャンの照合は端末ミラーが走る(shared/utils/offline.ts の offlineScanCheckResponse)。
+// flush は**その時点のシート値**を読んでから書く(他の端末の書き込みを吸収する)。
 
 // ── 記録の確定(flush: シート書き込み + payload + 証跡)─────
 

@@ -1,6 +1,7 @@
 /**
  * /items(レコード一覧)の headless Chrome 検証。
- *   - SSR/初回: 1バッチだけ描画され、総件数が status に出る
+ *   - 初回: 端末ミラー(IndexedDB)から1バッチだけ描画され、総件数が status に出る
+ *     (一覧は server の照会APIを読まない。取り込みは /scan の「このデータを端末に取り込む」で先に済ませる)
  *   - スロール追記: 最下部に到達すると次のバッチが自動で追加され、最終的に全件になる
  *   - インクリメンタル検索: 氏名/code の部分一致で列が絞られ、入力の連打は1照会にまとまる
  *   - 年・組の chip 絞り込み: 同一 facet は OR(件数の和)、年×組は AND(和より少ない)
@@ -10,7 +11,7 @@
  *     あり+なし = 全件(網羅・排他)、行を開くと備考の値が実際に入っている/空、備考の部分一致検索が効く
  *   - 項目の絞り込み(折りたたみ欄・任意 payload キー): トグル3個が1行に並び閉じると増分0。
  *     ボランティア欄などキーのあり+なし = 全件(網羅・排他)、再押で解除、備考・年・組との AND、
- *     filters= 参数が照会に載る。「行に表示する項目」chip で行に「キー: 値」が出る(条件は変わらない)
+ *     filters= 参数が URL に載る(条件は URL で復元する)。「行に表示する項目」chip で行に「キー: 値」が出る(条件は変わらない)
  *   - /scan の手入力欄が撤去されている( placeholder が存在しない)
  *   - 絞り込み状態の保持: 行タップで結果を開いて一覧に戻ると、条件・読み込み済みの行・
  *     スクロール位置がそのまま復活する(「一覧に戻る」とブラウザの戻るの両方)
@@ -32,9 +33,12 @@ const warns = []
 page.on('console', (m) => {
   if (m.type() === 'error' || m.type() === 'warning') warns.push(`${m.type()}: ${m.text().slice(0, 160)}`)
 })
-const listRequests = []
+const legacyRequests = []
+// 旧 server 照会(/api/items-* と /api/lookup)は撤去した。一覧・照会は端末ミラーが読むので、
+// これが1件でも出たら「まだ通信を読んでいる」として失敗にする。
 page.on('request', (r) => {
-  if (r.url().includes('/api/items-list')) listRequests.push(r.url().replace(base, ''))
+  if (r.url().includes('/api/items') || r.url().includes('/api/lookup'))
+    legacyRequests.push(r.url().replace(base, ''))
 })
 
 const out = []
@@ -79,11 +83,40 @@ function statusTotal() {
 function statusText() {
   return page.locator('.status').textContent().then((t) => t.trim())
 }
+/** 端末ミラーの items ストアで年・組のどちらかが空の行の件数(facet の missingPairs と同じ意味)。 */
+async function mirrorMissingPairs(pg) {
+  return pg.evaluate(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open('hinotike-offline')
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => reject(req.error)
+    })
+    const rows = await new Promise((resolve, reject) => {
+      const tx = db.transaction('items', 'readonly')
+      tx.objectStore('items').getAll().onsuccess = () => resolve(tx.result)
+      tx.onerror = () => reject(tx.error)
+    })
+    db.close()
+    return rows.filter((r) => !(r.payload?.['学年'] && r.payload?.['クラス'])).length
+  })
+}
+
 function rowCount() {
   return page.locator('.item-row').count()
 }
 
 await login()
+
+// 一覧は端末ミラーを読むので先に /scan から取り込む(dev シートは読み取りのみ。書き込まない)
+await page.goto(`${base}/scan`, { waitUntil: 'networkidle' })
+await page.locator('.admin-card > summary').click()
+await page.getByRole('button', { name: 'このデータを端末に取り込む' }).click()
+await page
+  .waitForFunction(() => document.body.textContent?.includes('取り込み完了'), undefined, { timeout: 60000 })
+  .catch(() => {
+    ok = false
+    out.push('取り込み完了の注記が出ない(一覧はミラーを読むのでこの検証は進められない)')
+  })
 
 // /scan に手入力欄が残っていないこと(撤去の確認)
 const manual = await page.getByPlaceholder('コードを直接入力').count()
@@ -304,7 +337,8 @@ if ((await statusTotal()) !== cell21 || (await activeCells()) !== 1) ok = false
 // 年または組が空のレコードはマトリクスで選べない旨を注記する(黙って減らさない)。
 // 注記の有無はデータ依存(facets の missingPairs)なので API の値と一致するだけで判定する(全行が年・組を持つシートでは注記が出ない=正しい)
 const hintPair = await page.locator('.hint').allTextContents()
-const facetsForNote = await page.evaluate(() => fetch('/api/items-facets').then((r) => r.json()))
+// missingPairs は端末ミラーの行から数える(server の facets API は無い)
+const facetsForNote = { missingPairs: await mirrorMissingPairs(page) }
 const noteShown = hintPair.some((t) => t.includes('年または組が空のレコードは'))
 const noteOk = noteShown === (facetsForNote.missingPairs > 0)
 out.push(`組み合わせモードの注記=${noteShown}(missingPairs=${facetsForNote.missingPairs} と一致=${noteOk}) / 0件のセルは押せない=${await cellLocator('1年4組').isDisabled()}(1年4組は件数0の可能性あり)`)
@@ -338,7 +372,7 @@ out.push(`消去ボタン: 値あり時の数=${clearBefore}(1) → クリック
 if (clearBefore !== 1 || clearedValue !== '' || clearAfter !== 0) ok = false
 
 // インクリメンタル検索: 氏名を1文字ずつ増やしながら絞られる
-listRequests.length = 0
+legacyRequests.length = 0
 await page.getByPlaceholder('氏名の一部を入力').pressSequentially('田中', { delay: 60 })
 await page.waitForFunction(
   () => {
@@ -363,8 +397,8 @@ await page.waitForFunction(
 const nameRows2 = await rowNames()
 out.push(`氏名=田中桔 → ${nameRows2.length}行(前の ${nameRows1.length}行 以下)=${nameRows2.length <= nameRows1.length}`)
 if (nameRows2.length > nameRows1.length || !nameRows2.every((n) => n.includes('田中桔'))) ok = false
-out.push(`氏名入力の照会数=${listRequests.length}(連打はデバウンスで1〜2にまとまる)`)
-if (listRequests.length > 3) ok = false
+out.push(`氏名入力の旧照会APIの通信数=${legacyRequests.length}(0 が期待値。ミラーで照合するので通信しない)`)
+if (legacyRequests.length > 0) ok = false
 
 // code 検索(部分一致)
 await page.getByPlaceholder('氏名の一部を入力').fill('')
@@ -519,7 +553,7 @@ const visibleCode = (await rowCodes())[visibleIndex]
 out.push(`保持テスト: 3組で ${await statusTotal()}件 /スクロール=${scrollBefore}px / 開く行=${visibleCode}(idx=${visibleIndex})`)
 if (visibleIndex < 0) ok = false
 
-listRequests.length = 0
+legacyRequests.length = 0
 await page.locator('.item-row').nth(visibleIndex).locator('a').click()
 await page.waitForFunction(() => location.pathname === '/result', { timeout: 5000 })
 const openedCode = await page.textContent('.result-card')
@@ -539,9 +573,9 @@ const keepOk =
   backMeta.length > 0 &&
   backMeta.every((m) => m[1] === '3組') &&
   Math.abs(backScroll - scrollBefore) <= 4 &&
-  listRequests.length === 0
+  legacyRequests.length === 0
 out.push(
-  `結果から「一覧に戻る」 → active=${backActiveChips.join(',')} / total=${backTotal}(=${group3Again}) / 全行の組が3組=${backMeta.every((m) => m[1] === '3組')} / スクロール=${backScroll}(去る時 ${scrollBefore}) / items-list の再fetch=${listRequests.length}(0 が期待値)`,
+  `結果から「一覧に戻る」 → active=${backActiveChips.join(',')} / total=${backTotal}(=${group3Again}) / 全行の組が3組=${backMeta.every((m) => m[1] === '3組')} / スクロール=${backScroll}(去る時 ${scrollBefore}) / 旧照会APIの通信=${legacyRequests.length}(0 が期待値)`,
 )
 if (!keepOk) ok = false
 
@@ -626,18 +660,18 @@ if (cardOpen <= cardClosed) ok = false
 // 有無: 「あり」と「なし」の件数の和 = 全件(網羅かつ排他)。URL に状態が写る
 const presentButton = page.getByRole('button', { name: 'あり', exact: true })
 const absentButton = page.getByRole('button', { name: 'なし', exact: true })
-listRequests.length = 0
+legacyRequests.length = 0
 await presentButton.click()
 await waitSettled()
 const totalPresent = await statusTotal()
 const remarkTextOnFirst = await openFirstRowAndRemark()
-listRequests.length = 0
+legacyRequests.length = 0
 await absentButton.click()
 await waitSettled()
 const totalAbsent = await statusTotal()
 const remarkTextOnAbsent = await openFirstRowAndRemark()
 out.push(
-  `備考の有無 → あり=${totalPresent} / なし=${totalAbsent} / 和=${totalPresent + totalAbsent}(全件 ${totalAll} と一致)=${totalPresent + totalAbsent === totalAll} / ありの行の備考="${remarkTextOnFirst}"(空でない) / なしの行の備考="${remarkTextOnAbsent}"(空) / リクエスト=${listRequests.some((u) => u.includes('remarkState=absent'))}`,
+  `備考の有無 → あり=${totalPresent} / なし=${totalAbsent} / 和=${totalPresent + totalAbsent}(全件 ${totalAll} と一致)=${totalPresent + totalAbsent === totalAll} / ありの行の備考="${remarkTextOnFirst}"(空でない) / なしの行の備考="${remarkTextOnAbsent}"(空) / URLに remarkState=absent=${page.url().includes('remarkState=absent')}`,
 )
 if (totalPresent <= 0 || totalAbsent <= 0 || totalPresent + totalAbsent !== totalAll) ok = false
 if (!remarkTextOnFirst) ok = false
@@ -647,7 +681,7 @@ if (remarkTextOnAbsent !== '') ok = false
 await page.getByRole('button', { name: 'すべて', exact: true }).click()
 await waitSettled()
 if ((await statusTotal()) !== totalAll) ok = false
-listRequests.length = 0
+legacyRequests.length = 0
 await page.getByPlaceholder('備考の一部を入力').pressSequentially('振込', { delay: 60 })
 await page.waitForFunction(
   () => /\d+ 件中 \d+ 件表示/.test(document.querySelector('.status')?.textContent ?? ''),
@@ -657,7 +691,7 @@ const totalRemark = await statusTotal()
 const remarkSearchLabel = await remarkToggle.textContent()
 const remarkOnSearchRow = await openFirstRowAndRemark()
 out.push(
-  `備考の文字検索(振込) → total=${totalRemark}(あり ${totalPresent} 以下)=${totalRemark <= totalPresent} / 先頭の行の備考="${remarkOnSearchRow?.slice(0, 40)}" / 検索語を含む=${!!remarkOnSearchRow && remarkOnSearchRow.includes('振込')} / リクエスト=${listRequests.some((u) => u.includes('remark='))} / トグルのラベル="${remarkSearchLabel?.trim()}"`,
+  `備考の文字検索(振込) → total=${totalRemark}(あり ${totalPresent} 以下)=${totalRemark <= totalPresent} / 先頭の行の備考="${remarkOnSearchRow?.slice(0, 40)}" / 検索語を含む=${!!remarkOnSearchRow && remarkOnSearchRow.includes('振込')} / URLに remark=${page.url().includes('remark=')} / トグルのラベル="${remarkSearchLabel?.trim()}"`,
 )
 if (totalRemark <= 0 || totalRemark > totalPresent || !remarkOnSearchRow?.includes('振込')) ok = false
 if (!remarkSearchLabel?.includes('振込')) ok = false
@@ -720,7 +754,7 @@ if (!chosen) {
   const absentBtn = chosen.row.locator('.mode-row .btn').nth(1)
 
   // あり → 件数と総件数が一致し、filters= 参数が照会に載る。なし → 同じ。両者の和 = 全件(網羅・排他)
-  listRequests.length = 0
+  legacyRequests.length = 0
   await presentBtn.click()
   await waitSettled()
   const totalKeyPresent = await statusTotal()
@@ -729,10 +763,10 @@ if (!chosen) {
   const totalKeyAbsent = await statusTotal()
   const sumOk = totalKeyPresent + totalKeyAbsent === totalAll && chosen.present + chosen.absent === totalAll
   out.push(
-    `項目の有無(${chosen.label}) → あり=${totalKeyPresent}(ボタン件数 ${chosen.present}) / なし=${totalKeyAbsent}(ボタン件数 ${chosen.absent}) / 和=${totalKeyPresent + totalKeyAbsent}(全件 ${totalAll})=${sumOk} / filters 参数付き照会=${listRequests.some((u) => u.includes('filters='))}`,
+    `項目の有無(${chosen.label}) → あり=${totalKeyPresent}(ボタン件数 ${chosen.present}) / なし=${totalKeyAbsent}(ボタン件数 ${chosen.absent}) / 和=${totalKeyPresent + totalKeyAbsent}(全件 ${totalAll})=${sumOk} / URLに filters=${page.url().includes('filters=')}`,
   )
   if (!sumOk || totalKeyPresent !== chosen.present || totalKeyAbsent !== chosen.absent) ok = false
-  if (!listRequests.some((u) => u.includes('filters='))) ok = false
+  if (!page.url().includes('filters=')) ok = false
 
   // 再押で解除して全件に戻る(aria-pressed=false)
   await absentBtn.click()
@@ -763,13 +797,13 @@ if (!chosen) {
   await waitSettled()
   const depositRow = page.locator('.key-row').filter({ hasText: /^入金状況/ }).first()
   const depositInfo = await depositRow.locator('.mode-row .btn').first().evaluate((el) => Number(el.textContent.trim().match(/(\d+)\s*$/)?.[1] ?? -1))
-  listRequests.length = 0
+  legacyRequests.length = 0
   await page.locator('.key-select').selectOption('入金状況')
   await page.getByPlaceholder('値の一部を入力').fill('未')
   await waitSettled()
   const containsTotal = await statusTotal()
-  const containsOk = containsTotal > 0 && containsTotal <= depositInfo && listRequests.some((u) => u.includes('contains'))
-  out.push(`項目の部分一致(入金状況 に「未」) → total=${containsTotal}(あり件数 ${depositInfo} 以下かつ>0)=${containsOk} / contains 参数付き照会=${listRequests.some((u) => u.includes('contains'))}`)
+  const containsOk = containsTotal > 0 && containsTotal <= depositInfo && page.url().includes('contains')
+  out.push(`項目の部分一致(入金状況 に「未」) → total=${containsTotal}(あり件数 ${depositInfo} 以下かつ>0)=${containsOk} / URLに contains=${page.url().includes('contains')}`)
   if (!containsOk) ok = false
   await page.getByPlaceholder('値の一部を入力').fill('')
   await waitSettled()
@@ -779,12 +813,12 @@ if (!chosen) {
   const payRow = page.locator('.key-row').filter({ hasText: /^支払い方法/ }).first()
   const payChip = payRow.locator('.facet .chip').first()
   const payChipCount = Number((await payChip.textContent()).match(/(\d+)\s*$/)?.[1] ?? -1)
-  listRequests.length = 0
+  legacyRequests.length = 0
   await payChip.click()
   await waitSettled()
   const chipTotal = await statusTotal()
-  const chipOk = chipTotal === payChipCount && listRequests.some((u) => u.includes('in%7C') || u.includes('|in|'))
-  out.push(`項目の値 chip(支払い方法) → "${(await payChip.textContent()).trim()}" → total=${chipTotal}(chip 件数 ${payChipCount} と一致)=${chipOk} / in 参数付き照会=${listRequests.some((u) => u.includes('in%7C') || u.includes('|in|'))} (最終照会=${listRequests.slice(-1)[0]?.slice(0, 180)})`)
+  const chipOk = chipTotal === payChipCount && (page.url().includes('in%7C') || page.url().includes('|in|'))
+  out.push(`項目の値 chip(支払い方法) → "${(await payChip.textContent()).trim()}" → total=${chipTotal}(chip 件数 ${payChipCount} と一致)=${chipOk} / URLに in=${page.url().includes('in%7C') || page.url().includes('|in|')} (現在のURL=${page.url().slice(-160)})`)
   if (!chipOk) ok = false
   await payChip.click()
   await waitSettled()

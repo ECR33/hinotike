@@ -1,12 +1,15 @@
 /**
  * 認証登録フローの統合テスト(参考: slack2mail の test/supabase/login-to-top-flow)。
- * ローカル Supabase + schema.sql 適用を前提とし、env がなければ自動スキップする。
+ * ローカル Supabase + マイグレーション適用を前提とし、env がなければ自動スキップする。
  *
- * 前提: `supabase start` と SQL Editor(schema.sql)適用済み。
+ * 前提: `supabase start` と `supabase migration up` 適用済み。
  * 実行: SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY / SUPABASE_SECRET_KEY を env に与えて npm test。
  * 注: OAuth のブラウザフローは再現できないため、
  *   admin.auth.admin.createUser(email_confirm: true) + signInWithPassword で
  *   「検証済み email のログイン」を再現し、callback が呼ぶ RPC を直接叩く。
+ *
+ * 2026-11-26 のレガシーテーブル撤去: データ本体の `items` テーブルは無い(0009 で drop)。
+ * RLS の確認は **取り込み定義(public.sync_sources)** を見る(実シートは読まない)。
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
@@ -21,7 +24,8 @@ const describeFlow = describe.skipIf(!PUB_KEY || !SECRET_KEY)
 const TEST_EMAIL = 'flow_test@example.com'
 const UNREG_EMAIL = 'unregistered_flow@example.com'
 const TEST_PASSWORD = 'test-password-12345'
-const TEST_CODE = 'flow-test-code'
+// 定義(sync_sources)の RLS を見るための一時行(spreadsheet_id はダミー。シートは読まない)
+const TEST_SOURCE_NAME = 'flow-test-dataset'
 
 let admin: SupabaseClient
 let authUserId: string | null = null
@@ -34,13 +38,13 @@ async function signInAs(email: string): Promise<SupabaseClient> {
   return user
 }
 
-describeFlow('email事前登録 → 初回ログイン紐付け → items照会(RLS)', () => {
+describeFlow('email事前登録 → 初回ログイン紐付け → 定義の閲覧(RLS)', () => {
   beforeAll(async () => {
     admin = createClient(URL, SECRET_KEY)
     // 前回テストの残りを掃除
     await admin.from('users').delete().eq('email', TEST_EMAIL)
     await admin.from('users').delete().eq('email', UNREG_EMAIL)
-    await admin.from('items').delete().eq('code', TEST_CODE)
+    await admin.from('sync_sources').delete().eq('name', TEST_SOURCE_NAME)
     const { data: list } = await admin.auth.admin.listUsers()
     for (const u of list?.users ?? []) {
       if (u.email === TEST_EMAIL || u.email === UNREG_EMAIL) {
@@ -86,15 +90,15 @@ describeFlow('email事前登録 → 初回ログイン紐付け → items照会(
     expect(registered).toBe(true)
   })
 
-  it('紐付け済みユーザは items を閲覧できる(RLS is_registered_user)', async () => {
-    await admin.from('items').upsert({ code: TEST_CODE, payload: { label: 'flow' } })
+  it('紐付け済みユーザは取り込み定義(sync_sources)を閲覧できる(RLS is_registered_user)', async () => {
+    await admin.from('sync_sources').insert({ name: TEST_SOURCE_NAME, spreadsheet_id: 'flowtestid123456' })
 
     const user = await signInAs(TEST_EMAIL)
-    const { data } = await user.from('items').select('*').eq('code', TEST_CODE).maybeSingle()
-    expect(data?.code).toBe(TEST_CODE)
+    const { data } = await user.from('sync_sources').select('name').eq('name', TEST_SOURCE_NAME).maybeSingle()
+    expect(data?.name).toBe(TEST_SOURCE_NAME)
   })
 
-  it('未紐付けユーザは items・自分のusers行も閲覧できず、is_registered_user は false', async () => {
+  it('未紐付けユーザは定義・自分のusers行も閲覧できず、is_registered_user は false', async () => {
     const { data: created, error } = await admin.auth.admin.createUser({
       email: UNREG_EMAIL,
       password: TEST_PASSWORD,
@@ -105,8 +109,9 @@ describeFlow('email事前登録 → 初回ログイン紐付け → items照会(
 
     const user = await signInAs(UNREG_EMAIL)
 
-    const { data: items } = await user.from('items').select('*').eq('code', TEST_CODE).maybeSingle()
-    expect(items).toBeNull()
+    // 定義行は RLS で見えません(未紐付けは is_registered_user が false)
+    const { data: sources } = await user.from('sync_sources').select('*')
+    expect(sources).toEqual([])
 
     const { data: users } = await user.from('users').select('*')
     expect(users).toEqual([])
@@ -129,6 +134,6 @@ describeFlow('email事前登録 → 初回ログイン紐付け → items照会(
     if (unregUserId) await admin.auth.admin.deleteUser(unregUserId)
     await admin.from('users').delete().eq('email', TEST_EMAIL)
     await admin.from('users').delete().eq('email', UNREG_EMAIL)
-    await admin.from('items').delete().eq('code', TEST_CODE)
+    await admin.from('sync_sources').delete().eq('name', TEST_SOURCE_NAME)
   })
 })

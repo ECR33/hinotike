@@ -35,70 +35,84 @@ type RemarkUpdateResponse = {
   sourceId: number
 }
 
-// SSR で解決した結果は useState 経由で hydration 時にクライアントへ引き継がれる(再fetch防止)。
-// SSR の内部 fetch は cookie を自動では持たないため useRequestHeaders で明示転送する。
+/**
+ * 照会の解決状態。**照会は端末内のミラー(取り込みデータ)だけ**で行う(server の照会 API は無い)。
+ * storage は client からのみ読めるので SSR と初期 hydration は `noMirror`(案内だけ描画し、マウント後に
+ * この端末のミラーを照会する)。`foreign` = 別利用者が取り込んだミラー(氏名を見せない)、
+ * `uidPending` = 取り込み済みだがログイン状態が未解決(氏名を出さない)。
+ */
+type LookupStatus = 'noMirror' | 'ready' | 'foreign' | 'uidPending'
+
+/** 照会結果(client のマウントで解決し、useState でページ遷移間に保持する)。 */
 const result = useState<LookupResult | null>('lookup-result', () => null)
+const lookupStatus = useState<LookupStatus>('lookup-status', () => 'noMirror')
 const errorMessage = useState<string | null>('lookup-error', () => null)
-// オフラインフォールバック照会(/api/lookup が失敗し、オフラインモードが有効ならローカルスナップショットで照会する)
-const offlineLookup = useState<boolean>('lookup-offline', () => false)
+/** 照会がどの取り込み(ミラーメタ)に対して走ったか(注記の取り込み日時・件数用)。 */
 const offlineMeta = useState<OfflineMeta | null>('lookup-offline-meta', () => null)
 
-async function fetchLookup(c: string) {
-  // 作業中のデータセット(取り込み済みのミラーと同じシート)を照会する。未取り込みは server が有効な最初のデータセットを選ぶ。
+/**
+ * 端末ミラーから照会する(この画面の唯一の照会経路)。
+ * 未取り込み・別利用者の取り込み・uid 未解決は照会せず案内を出す(端末の氏名を別ユーザに見せない)。
+ * 商品表示順は取り込み時の定義スナップショット(includeColumns の行順を rename 後のキーに写す)から作る。
+ */
+async function lookupFromMirror(c: string): Promise<void> {
+  if (!import.meta.client || !c) return
   const meta = readOfflineMetaFromStorage()
-  const local = localMirror(meta)
+  offlineMeta.value = meta
+  errorMessage.value = null
+  if (!meta || !meta.enabled) {
+    result.value = null
+    lookupStatus.value = 'noMirror'
+    return
+  }
+  if (!authState.value?.uid) {
+    result.value = null
+    lookupStatus.value = 'uidPending'
+    return
+  }
+  if (!mirrorBelongsToUser(meta, authState.value?.uid)) {
+    result.value = null
+    lookupStatus.value = 'foreign'
+    return
+  }
+  lookupStatus.value = 'ready'
   try {
-    result.value = await $fetch<LookupResult>('/api/lookup', {
-      method: 'POST',
-      body: { code: c, sourceId: local && meta ? meta.sourceId : undefined },
-      headers: useRequestHeaders(['cookie']),
-    })
-    errorMessage.value = null
-    offlineLookup.value = false
-    offlineMeta.value = null
-  } catch (e: unknown) {
-    // ローカル作業では /api/lookup の失敗を端末ミラーの照会にフォールバックする
-    // (地下での「照会」。SSR は storage を読めないのでこの経路は client の遷移のみ)。
-    // uid 不一致(別利用者が取り込んだミラー)ではフォールバックしない = 通信の照会失敗として出す。
-    if (local && meta) {
-      const row = await offlineGetItem(meta.sourceId, c).catch(() => undefined)
-      result.value = {
-        found: row !== undefined,
-        code: c,
-        row: row ? { code: row.code, payload: row.payload } : null,
-        productOrder: meta.source.includeColumns.length ? productOrderKeys(meta.source.includeColumns, meta.source.rename) : [],
-        sourceId: meta.sourceId,
-        sheetTitle: meta.config.sheetTitle ?? '',
-      }
-      offlineLookup.value = true
-      offlineMeta.value = meta
-      errorMessage.value = null
-      return
+    const row = await offlineGetItem(meta.sourceId, c)
+    result.value = {
+      found: row !== undefined,
+      code: c,
+      row: row ? { code: row.code, payload: row.payload } : null,
+      productOrder: productOrderKeys(meta.source.includeColumns, meta.source.rename),
+      sourceId: meta.sourceId,
+      sheetTitle: meta.config.sheetTitle ?? '',
     }
-    errorMessage.value = describeApiError(e).friendly
+  } catch (e: unknown) {
+    errorMessage.value = '端末内のデータの読み出しに失敗しました(IndexedDB が使えない・開けない環境です)'
+    console.error('[result] mirror lookup failed:', e instanceof Error ? e.message : e)
   }
 }
 
-// code が無い画面(/result 単体)は照会しない(API は 400 を返すだけなので空の案内カードを出す)。
-// SSR結果のhydration(code一致)は再fetchしない。client-side遷移で旧結果が別codeのものは
-// staleなので再照会する(旧codeのまま表示されるバグ修正)。
-const cachedForCurrentCode = result.value !== null && result.value.code === code.value
-if (code.value && !cachedForCurrentCode && !(result.value === null && errorMessage.value !== null)) {
-  await fetchLookup(code.value)
-}
+// code が無い画面(/result 単体)は照会しない(空の案内カードを出す)。
+// storage は client からのみ読めるので、マウントでこの端末のミラーを照会する(SSR は案内だけ描画する)。
+onMounted(() => {
+  void lookupFromMirror(code.value)
+})
 
 // クライアント遷移で code が変わった場合は再照会する
 watch(code, (c) => {
-  if (result.value?.code !== c) void fetchLookup(c)
+  if (result.value?.code !== c) void lookupFromMirror(c)
   // code が変わったら編集状態は古い code の内容なので閉じる
   if (result.value?.code !== c) closeRemarkEditor()
   if (historyFor.value !== c) void fetchHistory(c)
 })
 
+// uid が後から解決される(缓存 HTML を開いた等で auth-state が未解決)場合、ミラーの照会を打ち直す
+watch(() => authState.value?.uid, () => void lookupFromMirror(code.value))
+
 /**
  * スキャンの記録履歴(scan_events)。この code が「いつ・どのモードで・誰が」読み取ったかの監査履歴。
  * シートセルは1値しか残らないので、来場・配布の読み取り時刻の履歴はここが正(/records でも閲覧できる)。
- * 照会と同じ SSR 解决 + useState 引き継ぎ(code が違う缓存は stale なので client で再fetch)。
+ * SSR で解決して useState で引き継ぐ(照会は client のマウントで走る。code が違う缓存は stale なので client で再fetch)。
  */
 const history = useState<ScanHistoryResponse | null>('scan-history', () => null)
 const historyFor = useState<string>('scan-history-code', () => '')
@@ -109,8 +123,8 @@ async function fetchHistory(c: string) {
     historyFor.value = ''
     return
   }
-  // オフラインモード中は履歴(/api/scan-history)を通信しない(照会本体はローカルフォールバックで出る)。
-  // 別利用者のミラー(uid 不一致)では通信するので履歴も通信する。
+  // この端末のデータで照会している間は履歴(/api/scan-history)を通信しない(照会は端末内のミラーから出す)。
+  // 未取り込み・別利用者のミラー(uid 不一致)では照会しないので、履歴は通信して読む。
   if (localMirror(readOfflineMetaFromStorage())) {
     history.value = null
     historyFor.value = c
@@ -155,9 +169,10 @@ async function saveRemark() {
   remarkBusy.value = true
   remarkError.value = null
   try {
+    // 照会したデータセットと同じシートへ書く(取り込み済みのミラーと同じ dataset。未指定は server が既定を選ぶ)
     const res = await $fetch<RemarkUpdateResponse>('/api/remark-update', {
       method: 'POST',
-      body: { code: result.value.code, remark: remarkDraft.value },
+      body: { code: result.value.code, remark: remarkDraft.value, sourceId: offlineMeta.value?.sourceId },
     })
     // 保存結果を再fetchなしで画面に反映(trim 後の値。空はキー削除 = 取り込み側の empty skip と同じ)
     const p = { ...(result.value.row.payload ?? {}) } as Record<string, string>
@@ -359,10 +374,27 @@ function groupThousands(digits: string): string {
       </p>
     </div>
 
+    <!-- 照会できる端末ミラーが無い端末の案内(storage は client からのみ読めるので SSR もこの案内を出す) -->
+    <div v-else-if="lookupStatus === 'noMirror'" class="card">
+      <p class="muted result-note">
+        この端末には取り込み済みのデータがありません。取り込み済みの端末でこの画面を開くか、「データの設定」(/sync)でこのデータセットを「このスマホに取り込む」してください(照会は端末内のデータから行います)。
+      </p>
+    </div>
+    <div v-else-if="lookupStatus === 'foreign'" class="error card">
+      <p>
+        この端末のデータは別の利用者が取り込んだものです(氏名を含むため照会しません)。この利用者として取り込みし直すか、「データの設定」(/sync)で端末のデータを削除してください。
+      </p>
+    </div>
+    <div v-else-if="lookupStatus === 'uidPending'" class="card">
+      <p class="muted result-note">
+        取り込み済みのデータがありますがログイン状態が解決できていないため照会しません(ログインしてから開いてください)。
+      </p>
+    </div>
+
     <div v-else-if="result && !result.found" class="card result-card result-empty">
       <p class="result-code">コード {{ code }}</p>
       <p class="result-empty-text">該当するデータが見つかりませんでした。</p>
-      <p v-if="offlineLookup" class="muted offline-note">
+      <p v-if="lookupStatus === 'ready'" class="muted offline-note">
         この端末のデータ({{ offlineMeta?.itemCount ?? 0 }}件・取り込み {{ formatJst(offlineMeta?.snapshotAt ?? '') }})の中にもありません。
       </p>
     </div>
@@ -377,9 +409,9 @@ function groupThousands(digits: string): string {
         <p class="result-code">コード {{ result.code }}</p>
       </div>
 
-      <!-- ローカル照会: この端末のデータからの照会である旨と、履歴・備考編集がオンライン限定であることを注記する -->
-      <p v-if="offlineLookup" class="muted offline-note">
-        この端末のデータから照会しました(取り込み {{ formatJst(offlineMeta?.snapshotAt ?? '') }} / {{ offlineMeta?.itemCount ?? 0 }}件)。スキャン履歴と備考の編集は通信が戻ってから利用できます。
+      <!-- 端末ミラー照会である旨と、履歴・備考の保存が server 通信であることを注記する -->
+      <p v-if="lookupStatus === 'ready'" class="muted offline-note">
+        この端末のデータから照会しました(取り込み {{ formatJst(offlineMeta?.snapshotAt ?? '') }} / {{ offlineMeta?.itemCount ?? 0 }}件)。シートが正なので、取り込み後にシート側で変わった値は次の取り込みまで現れません。スキャン履歴の表示と備考の保存は server に通信します(備考の保存はシートに書き、この端末のデータにも写します)。
       </p>
 
       <!-- 金額・支払いのまとまり(1つの枠に3セル) -->
@@ -412,7 +444,7 @@ function groupThousands(digits: string): string {
         <template v-for="[key, value] in entries" :key="key">
           <div class="result-row">
             <dt>{{ key }}</dt>
-            <!-- 備考だけインライン編集(保存でスプレッドシートと items に反映) -->
+            <!-- 備考だけインライン編集(保存はシートへ書き、この端末のデータにも反映) -->
             <dd v-if="key === ITEM_REMARK_KEY && editingRemark" class="remark-edit">
               <textarea
                 v-model="remarkDraft"
@@ -433,8 +465,8 @@ function groupThousands(digits: string): string {
             </dd>
             <dd v-else-if="key === ITEM_REMARK_KEY">
               <span>{{ value }}</span>
-              <!-- オフライン照会では備考の編集(/api/remark-update)できない(ボタンを出さない) -->
-              <button v-if="!offlineLookup" class="btn secondary remark-edit-btn" type="button" @click="startRemarkEdit">編集</button>
+              <!-- 備考だけインライン編集(保存は /api/remark-update でシートへ書き、この端末のデータにも写す) -->
+              <button class="btn secondary remark-edit-btn" type="button" @click="startRemarkEdit">編集</button>
             </dd>
             <dd v-else>{{ value }}</dd>
           </div>

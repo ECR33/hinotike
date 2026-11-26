@@ -1,14 +1,14 @@
 /**
  * ローカルデータセット(=旧「オフラインモード」)の共通ロジック(純粋関数)。
  *
- * 設計(2026-11-22 の複数データセット化):
+ * 設計(2026-11-22 の複数データセット化 + 2026-11-26 のレガシーテーブル撤去):
  * - **データ本体は端末内に置く**。作業前に「どのデータセット(spreadsheet)で作業するか」を決め、
- *   `GET /api/import` でそのシートを取り込み(IndexedDB の `items` ストア、key=`sourceId|code`)する。
- *   Supabase の `items` テーブルは使わない(シートが唯一の正)。
+ *   `GET /api/import` でそのシートを取り込み(IndexedDB の `items` ストア = 端末内の行。key=`sourceId|code`)する。
+ *   データ本体を置く Supabase テーブルは無い(旧 `items` テーブルは 0009 で drop。シートが唯一の正)。
  * - 「オフライン」という語は**ローカルデータで作業する**の意味として残す: 取り込み済みなら
  *   通信があってもなくても照会・一覧・チェックインは端末内のミラーに対して走る。
- * - 照会・一覧・項目キーの照合はこのファイルの**1つの実装**が server(/api/items-* のシート由来版)と
- *   画面(IndexedDB のミラー)の両方で同じ意味で効く。PostgREST の jsonb パス照会 duplicate は撤去した。
+ * - 照会・一覧・項目キーの照合は**このファイルの1つの実装**が端末ミラーで効く(server に照会APIは無い)。
+ *   取り込み応答の行(シート由来)とミラーの行は同じ形なので、同じ関数が両方で使える。
  * - 記録の待機列(queue)は端末に残る。任意のタイミングで `POST /api/scan-offline-flush` を送り、
  *   サーバーがシートを再読して行位置と現在の状態を確定して書く。**日時はオフライン時の読み取り時刻(at)を保持**。
  *   既に「済」だった行は dedupe で書き込まず duplicate/skipped を返す。
@@ -257,7 +257,7 @@ export function makeOfflineQueueId(modeId: number, code: string, at: string): st
 /**
  * /api/scan-offline-flush の body entries を正規化する。
  * 不正項目は項目単位で捨てる(throw すると1壊れた entry が確定全体を止める)。
- * 利用者登録QR(`hinotike-registration:`)は記録対象ではないので除外する(scan-check と同じ基準)。
+ * 利用者登録QR(`hinotike-registration:`)は記録対象ではないので除外する(サーバーの flush も同じ基準で除く)。
  */
 export function normalizeOfflineEntries(raw: unknown, max = OFFLINE_FLUSH_MAX): OfflineFlushInput[] {
   const items = Array.isArray(raw) ? raw : []
@@ -280,7 +280,7 @@ export function normalizeOfflineEntries(raw: unknown, max = OFFLINE_FLUSH_MAX): 
 // ── オフラインの check(payload をシート/DB の鏡として扱う)─
 
 /**
- * オフラインの scan-check 相当(items スナップショットの payload から氏名・済/未・記録日時を出す)。
+ * スキャンの照合(端末ミラーの payload から氏名・済/未・記録日時を出す。サーバー照合 API は無い)。
  * シート行の存在判定はオフラインではできないので sheet_missing は出さない(復旧後の flush 側で確定)。
  * payload が無い = ローカルスナップショットに見つからない → requireFound のモードは not_found。
  */
@@ -299,7 +299,7 @@ export function offlineScanCheckResponse(
   return { modeId, code, status, name, state, recordedAt, at }
 }
 
-// ── オフラインの items 一覧(/api/items-list の照会意味をローカルで再現する)──
+// ── 端末ミラーの一一覧(絞り込み + 分页)─────────────────
 
 /**
  * 部分一致のローカル照合。server の ilike は `%pat%` の大文字小文字無視(アクセントは区別)なので
@@ -314,7 +314,7 @@ function payloadText(payload: Record<string, unknown> | null | undefined, key: s
   return payloadValue(payload, key)
 }
 
-/** 画面が送る items-list の query と同じ形の入力(正規化はこの関数が shared の normalize を使う)。 */
+/** 画面が読む query と同じ形の入力(URL の絞り込み値もこの shared の normalize で正規化する)。 */
 export interface OfflineItemsQueryInput {
   code?: unknown
   name?: unknown
@@ -328,7 +328,7 @@ export interface OfflineItemsQueryInput {
   limit?: unknown
 }
 
-/** items-list の応答と同じ形(キーセットカーソル + exact count)。 */
+/** 一覧の応答形(キーセットカーソル + exact count)。 */
 export interface OfflineItemsPage {
   rows: ItemRowData[]
   nextCursor: string | null
@@ -337,17 +337,17 @@ export interface OfflineItemsPage {
 
 /**
  * スナップショットの rows(code 昇順とは限らない — IDB の key は文字列なので数値順に並べ直す)から
- * items-list と**同じ意味**で絞り込み+分页する。キーセットカーソルは `code > cursor`(数値比較)。
+ * 絞り込み+分页する。キーセットカーソルは `code > cursor`(数値比較)。
  * total は一致する総件数(exact)で、UI の「N 件中 M 件表示」にそのまま使える。
  *
- * server の PostgREST との対応:
+ * 照合の意味:
  *  - ilike(部分一致・大文字小文字無視) → containsLocalText(NULL は一致しない。payloadValue は
  *    欠落・null を '' にするが '' はどんな pattern も含まないので NULL と同じ挙動になる)
  *  - payload->>key の text(文字はそのまま・number/boolean は文字化) → payloadValue と同じ
  *  - `in.` の完全一致 → selection は normalizeSelection で trim 済み。payload の raw 値と完全一致で比べる
  *    (server と同じ「trim した chip 値 vs raw payload 値」の非対称をそのまま再現する)
  *  - pairs(年 AND 組、ペア同士 OR)、remark/key の present・absent(欠落・null・空文字 = absent)、
- *    filters の contains/in(present/absent と異モードは AND)も items-list と同じ组合で効く。
+   filters の contains/in(present/absent と異モードは AND)もこの组合で効く。
  */
 export function offlineItemsQuery(rows: ItemRowData[], input: OfflineItemsQueryInput, limit?: unknown): OfflineItemsPage {
   const codePattern = normalizeFilter(input.code)
@@ -363,7 +363,7 @@ export function offlineItemsQuery(rows: ItemRowData[], input: OfflineItemsQueryI
   // server は int code を数値で gt する。不正カーソル(数値でない)は照会側が落ちる代わりに無視する
   // (ローカルのカーソルは offlineItemsQuery が last code から作るため常に数値。防御扱い)
   const hasCursor = cursorText !== '' && Number.isFinite(cursorNum)
-  // items-list の clampLimit と同じ補正(画面は limit を input と引数両方に載せるのでどちらでも効く)
+  // clampLimit の補正(画面は limit を input と引数両方に載せるのでどちらでも効く)
   const pageSize = clampLimit(limit ?? input.limit)
 
   const sorted = [...rows].sort((a, b) => compareFacetValues(a.code, b.code))
@@ -374,7 +374,7 @@ export function offlineItemsQuery(rows: ItemRowData[], input: OfflineItemsQueryI
     if (namePattern && !containsLocalText(payloadText(payload, ITEM_NAME_KEY), namePattern)) return false
     const remarkText = payloadText(payload, ITEM_REMARK_KEY)
     if (remarkPattern && !containsLocalText(remarkText, remarkPattern)) return false
-    // 備考の有無(items-list の present=not null & ''でない、absent=欠落・null・空文字)
+    // 備考の有無(present=非空、absent=欠落・null・空文字)
     if (remarkState === 'present' && remarkText === '') return false
     if (remarkState === 'absent' && remarkText !== '') return false
     if (years.length && !years.includes(payloadText(payload, ITEM_YEAR_KEY))) return false
@@ -404,7 +404,7 @@ export function offlineItemsQuery(rows: ItemRowData[], input: OfflineItemsQueryI
   return { rows: page, nextCursor: nextCursor(page, pageSize), total: matches.length }
 }
 
-/** items-facets の応答と同じ形(items.vue の ItemsFacets と同一の shape)。 */
+/** 年・組の選択肢の応答形(items.vue がミラーから導出する)。 */
 export interface OfflineFacets {
   years: FacetOption[]
   groups: FacetOption[]
@@ -415,7 +415,7 @@ export interface OfflineFacets {
 }
 
 /**
- * スナップショットから年・組の選択肢(facet)を導出する。server の items-facets と同じ shared 関数
+ * 取り込み行から年・組の選択肢(facet)を導出する(items.ts の shared 関数
  * (facetCounts / facetPairCounts / missingPairCount)を使い、payload を全件スキャンする
  * (server の ITEM_FACET_SCAN_LIMIT 上限はオフラインには無いので truncated は常に false)。
  */
@@ -435,9 +435,9 @@ export function offlineFacets(rows: ItemRowData[]): OfflineFacets {
 }
 
 /**
- * payload キーの発見(一覧の「任意項目」絞り込み・表示用)。server の items-keys とローカル一覧が同じ関数を使う。
+ * payload キーの発見(一覧の「任意項目」絞り込み・表示用)。
  *
- * 2つの源の和集合を出す(items-keys の設計そのまま):
+ * 2つの源の和集合を出す:
  *  - **定義から**: 取り込み定義(includeColumns + rename)で「載る予定のキー」(configKeys を渡す側)。
  *    includeColumns が空のときは rename の新キー名だけ(シートヘッダーは実データ側で出る)。
  *  - **実データから**: rows の payload をスキャンして実際に出現したキー。
@@ -455,7 +455,7 @@ export function datasetKeys(rows: ItemRowData[], configKeys: string[] = []): Ite
     for (const [key, value] of Object.entries(payload)) {
       seen.add(key)
       const text = value === null || value === undefined ? '' : typeof value === 'string' ? value : String(value)
-      // items-list の present と同じ判定(空文字・欠落は absent 側)
+      // present/absent と同じ判定(空文字・欠落は absent 側)
       if (text !== '') {
         present.set(key, (present.get(key) ?? 0) + 1)
         values.set(key, [...(values.get(key) ?? []), text])
@@ -485,7 +485,7 @@ export function offlineKeys(rows: ItemRowData[]): ItemsKeysResponse {
   return datasetKeys(rows, [])
 }
 
-/** 取り込み定義から「載る予定のキー」を作る(items-keys の設定側。codeColumn は除く)。 */
+/** 取り込み定義から「載る予定のキー」を作る(設定側。codeColumn は除く)。 */
 export function configuredPayloadKeys(source: SyncSource): string[] {
   const out: string[] = []
   if (source.includeColumns.length > 0) {

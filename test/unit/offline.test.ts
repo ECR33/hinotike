@@ -289,7 +289,7 @@ describe('parseOfflineMeta のモード補正(normalizeScanModes)', () => {
   })
 })
 
-// ── オフラインの items 一覧(/api/items-list の照会意味のローカル再現)──
+// ── 端末ミラーの一一覧(絞り込み + 分页)──
 
 const listRows = [
   { code: '1004', payload: { 氏名: '渡辺健斗', 学年: '1', クラス: '3', 備考: 'メモA', ボランティア: '清洗' } },
@@ -300,7 +300,7 @@ const listRows = [
 ]
 const codesOf = (page: { rows: { code: string }[] }) => page.rows.map((row) => row.code)
 
-describe('offlineItemsQuery(items-list と同じ意味)', () => {
+describe('offlineItemsQuery(端末ミラーの絞り込み+分页)', () => {
   it('code は数値昇順(IDB の文字列 key 順ではなく)・total は一致総件数', () => {
     const page = offlineItemsQuery(listRows, {}, 10)
     expect(codesOf(page)).toEqual(['5', '9', '200', '1004', '1023'])
@@ -332,7 +332,7 @@ describe('offlineItemsQuery(items-list と同じ意味)', () => {
   it('備考の有無(present=値あり・absent=欠落・null・空文字)', () => {
     expect(codesOf(offlineItemsQuery(listRows, { remarkState: 'present' }, 10))).toEqual(['1004'])
     expect(codesOf(offlineItemsQuery(listRows, { remarkState: 'absent' }, 10))).toEqual(['5', '9', '200', '1023'])
-    // 有無と文字検索の同時指定は AND(items-list と同じ。「なし+検索」は 0 件)
+    // 有無と文字検索の同時指定は AND(「なし+検索」は 0 件)
     expect(offlineItemsQuery(listRows, { remarkState: 'absent', remark: 'メモ' }, 10).total).toBe(0)
   })
 
@@ -361,7 +361,7 @@ describe('offlineItemsQuery(items-list と同じ意味)', () => {
     expect(codesOf(offlineItemsQuery(listRows, { name: '石坂', filters: ['ボランティア|present'] }, 10))).toEqual(['9'])
   })
 
-  it('limit は items-list の clampLimit と同じ補正(不正値は既定 25)', () => {
+  it('limit は clampLimit の補正(不正値は既定 25)', () => {
     expect(offlineItemsQuery(listRows, { limit: 'abc' }).rows.length).toBe(5) // 5件 < 25 なので全部出た
     const clamped = offlineItemsQuery(listRows, { limit: '1' })
     expect(clamped.rows.length).toBe(1)
@@ -389,7 +389,7 @@ describe('offlineFacets / offlineKeys(スナップショットからの導出)',
     expect(keys.truncated).toBe(false)
     const vol = keys.keys.find((entry) => entry.key === 'ボランティア')
     expect(vol).toBeDefined()
-    expect(vol?.presentCount).toBe(2) // null は absent 側(items-keys のループと同じ判定)
+    expect(vol?.presentCount).toBe(2) // null は absent 側(datasetKeys のループと同じ判定)
     expect(vol?.absentCount).toBe(3)
     expect(vol?.options.map((option) => option.value)).toEqual(['下草', '清洗'])
     expect(keys.keys.every((entry) => entry.fromConfig === false && entry.seenInData === true)).toBe(true)

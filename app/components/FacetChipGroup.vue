@@ -2,9 +2,9 @@
 /**
  * 年・組の絞り込み chip 群(app/components/FacetChipGroup.vue)。
  *
- * 多选択は「同一 facet 内で OR」(server/api/items-list.get.ts の in.())。
+ * 多选択は「同一 facet 内で OR」(照合は shared/utils/offline.ts の絞り込み)。
  * 押した chip は selected に値を追加 / 再押で除去(toggle)。選択順序は OR に影響しない。
- * options は items 全体の値と件数(GET /api/items-facets)で、現在の絞り込み結果には連動しない
+ * options は取り込みデータ全体の値と件数(端末ミラーから導出)で、現在の絞り込み結果には連動しない
  * (絞り込みで選択肢が消えると「選べなくなった理由」が分からなくなるため)。
  */
 import type { FacetOption } from '#shared/utils/items'

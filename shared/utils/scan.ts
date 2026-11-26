@@ -7,7 +7,7 @@
  * - モードは /scan の「新しい記録を作る」と管理欄から動的に増減する。
  * - actions = 書くカラムの組(済/未フラグ列 + 日時列)。シートヘッダー名は rename 前の実名
  *   (remark-update と同じ基準。payload キーは rename/rename 前名どちらでも指定できる)。
- * - payload キーは**スマホ内のミラー**(IndexedDB)に写す。Supabase の items テーブルは使わない。
+ * - payload キーは**スマホ内のミラー**(IndexedDB)に写す。データ本体の Supabase テーブルは無い.
  * - 証跡(scan_events)は「いつ・誰が・どのモードで・何を書いたか」の履歴。シートセルは1値しか残らない。
  * Nuxt 依存の import は置かない(server / shared / CLI どちらでも読めるように)。
  */
@@ -349,7 +349,7 @@ export interface ScanRecordEntry {
   at: string
 }
 
-/** /api/scan-check の応答(読み取り専用。書き込まない)。 */
+/** スキャンの照合の応答形(読み取り専用。端末ミラーが作る。サーバー照合 API は撤去した)。 */
 export interface ScanCheckResponse {
   modeId: number
   code: string
@@ -412,7 +412,7 @@ export interface ScanHistoryResponse {
 export const SCAN_HISTORY_PAGE_SIZE = 25
 export const SCAN_HISTORY_PAGE_MAX = 100
 
-/** クエリ参数の limit を安全な範囲に補正(items-list の clampLimit と同じ意図)。 */
+/** クエリ参数の limit を安全な範囲に補正(items.ts の clampLimit と同じ意図)。 */
 export function clampHistoryLimit(raw: unknown): number {
   const n = typeof raw === 'string' ? Number(raw) : typeof raw === 'number' ? raw : Number.NaN
   if (!Number.isInteger(n)) return SCAN_HISTORY_PAGE_SIZE

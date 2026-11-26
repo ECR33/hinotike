@@ -92,9 +92,18 @@ try {
   // 未記録の行を3件 pick(チケット配布は 配布済 を書く。スキャン済み=済の行は
   // dedupe warn になるので、開始時に未記録の行を選ぶことで再実行できる)。
   // 待機列の行は氏名を出す(entry.name があれば氏名、なければ code)ので実データの氏名で確認する。
+// /api/import はシートを読むだけで端末に書かない(このスクリプトはミラーを作らない)。
+  // シートの行を /api/import から読む(server の照会APIは撤去した。取り込み応答が唯一の行読み)。
   const picked = await page.evaluate(async () => {
-    const j = await (await fetch('/api/items-list?limit=200')).json()
-    return (j.rows ?? [])
+    const rows = []
+    let cursor = 0
+    for (let i = 0; i < 10; i++) {
+      const j = await (await fetch(`/api/import?limit=200&cursor=${cursor}`)).json()
+      rows.push(...(j.rows ?? []))
+      if (!j.nextCursor) break
+      cursor = Number(j.nextCursor)
+    }
+    return rows
       .filter((r) => r.payload?.['配布済'] !== '済' && (r.payload?.['氏名'] ?? '') !== '')
       .slice(0, 3)
       .map((r) => ({ code: String(r.code), name: String(r.payload['氏名']) }))

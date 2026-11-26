@@ -2,15 +2,12 @@ import { describe, expect, it } from 'vitest'
 import {
   clampLimit,
   compareFacetValues,
-  escapePayloadKey,
   facetCounts,
   FACET_MAX_VALUES,
   FACET_VALUE_MAX_LENGTH,
-  ITEM_GROUP_KEY,
   ITEM_PAGE_SIZE,
   ITEM_PAGE_SIZE_MAX,
   ITEM_PAIR_MAX,
-  ITEM_YEAR_KEY,
   isFilterableKey,
   keyAbsent,
   KEY_FILTER_MAX,
@@ -21,14 +18,11 @@ import {
   normalizePairs,
   normalizeRemarkState,
   normalizeSelection,
-  pairConditions,
   pairKey,
   parseKeyFilter,
   parsePair,
-  payloadTextColumn,
   payloadValue,
   productOrderKeys,
-  quoteInValue,
   sameKeyFilters,
   serializeKeyFilters,
   quantityName,
@@ -138,24 +132,12 @@ describe('normalizeSelection(年・組の選択値)', () => {
     expect(normalizeSelection([123])).toEqual([])
   })
 
-  it('個数と1つの長さの上限で切る(大量の in.() 値・長値を防ぐ)', () => {
+  it('個数と1つの長さの上限で切る(大量の選択値・長値を防ぐ)', () => {
     expect(normalizeSelection(Array.from({ length: FACET_MAX_VALUES + 5 }, (_, i) => String(i)))).toHaveLength(
       FACET_MAX_VALUES,
     )
     expect(normalizeSelection('a'.repeat(FACET_VALUE_MAX_LENGTH + 10))).toHaveLength(1)
     expect(normalizeSelection('a'.repeat(FACET_VALUE_MAX_LENGTH + 10))[0]).toHaveLength(FACET_VALUE_MAX_LENGTH)
-  })
-})
-
-describe('quoteInValue(PostgREST の in.() の値)', () => {
-  it('値をダブルクォートで守る(カンマ・括弧が混ざっても区切りとして扱われない)', () => {
-    expect(quoteInValue('1')).toBe('"1"')
-    expect(quoteInValue('a,b')).toBe('"a,b"')
-    expect(quoteInValue('(x)')).toBe('"(x)"')
-  })
-
-  it('内部の " は二重にして引用の区切りにしない', () => {
-    expect(quoteInValue('a"b')).toBe('"a""b"')
   })
 })
 
@@ -186,7 +168,7 @@ describe('parsePair / normalizePairs(年と組の対応指定)', () => {
     expect(parsePair('   :   ')).toBeNull()
   })
 
-  it('どちらかの値が長さ上限を超えたら null(長い値の eq.() を作らない)', () => {
+  it('どちらかの値が長さ上限を超えたら null(長い値のペアを作らない)', () => {
     expect(parsePair(`${'a'.repeat(FACET_VALUE_MAX_LENGTH + 1)}:3`)).toBeNull()
     expect(parsePair(`1:${'a'.repeat(FACET_VALUE_MAX_LENGTH + 1)}`)).toBeNull()
   })
@@ -211,26 +193,6 @@ describe('parsePair / normalizePairs(年と組の対応指定)', () => {
     expect(
       normalizePairs(Array.from({ length: ITEM_PAIR_MAX + 10 }, (_, i) => `${i}:${i + 1}`)),
     ).toHaveLength(ITEM_PAIR_MAX)
-  })
-})
-
-describe('pairConditions(年と組の対応を PostgREST の論理木にする)', () => {
-  const year = payloadTextColumn(ITEM_YEAR_KEY)
-  const group = payloadTextColumn(ITEM_GROUP_KEY)
-
-  it('1ペアは and(年.eq,組.eq)、複数ペアはカンマ区切り(supabase-js の .or() が or=(...) に包む)', () => {
-    expect(pairConditions([{ year: '1', group: '3' }])).toBe(`and(${year}.eq."1",${group}.eq."3")`)
-    expect(pairConditions([{ year: '1', group: '3' }, { year: '2', group: '1' }])).toBe(
-      `and(${year}.eq."1",${group}.eq."3"),and(${year}.eq."2",${group}.eq."1")`,
-    )
-  })
-
-  it('値の特殊文字は引用して守る(カンマ・引用符が論理木の区切りや終端にならない)', () => {
-    expect(pairConditions([{ year: 'a,b', group: 'c"d' }])).toBe(`and(${year}.eq."a,b",${group}.eq."c""d")`)
-  })
-
-  it('空選択は空文字(フィルタを適用しない)', () => {
-    expect(pairConditions([])).toBe('')
   })
 })
 
@@ -315,15 +277,6 @@ describe('productOrderKeys / quantityName / isQuantityKey(商品欄の表示順)
   })
 })
 
-describe('escapePayloadKey / payloadTextColumn(キー名に " が混ざってもパスを守る)', () => {
-  it('キー内の " は二重にして引用の終端にしない', () => {
-    expect(escapePayloadKey('a"b')).toBe('a""b')
-    expect(payloadTextColumn('a"b')).toBe('payload->>"a""b"')
-    // 通常のキー名は変化しない(既存の照会式と同じ形)
-    expect(payloadTextColumn('氏名')).toBe('payload->>"氏名"')
-  })
-})
-
 describe('parseKeyFilter(汎用キー絞り込み spec のパース)', () => {
   it('有無は値不要。キー・モードの空白と大文字は吸収する', () => {
     expect(parseKeyFilter('ボランティア|present')).toEqual({ key: 'ボランティア', mode: 'present', value: '', values: [] })
@@ -371,7 +324,7 @@ describe('parseKeyFilter(汎用キー絞り込み spec のパース)', () => {
     expect(parseKeyFilter(`${'a'.repeat(KEY_NAME_MAX_LENGTH + 5)}|present`)).toBeNull()
   })
 
-  it('キー名に " が混ざるキーは条件にしない(表示のみ。PostgREST/supabase-js の照会が安全に組めない)', () => {
+  it('キー名に " が混ざるキーは条件にしない(表示のみ。キー名の規則を一箇所で決める)', () => {
     expect(parseKeyFilter('特"殊キー|present')).toBeNull()
     expect(parseKeyFilter('特"殊キー|contains|x')).toBeNull()
   })
@@ -416,7 +369,7 @@ describe('normalizeKeyFilters(参数の受け取り・重複除き・上限)', (
     expect(normalizeKeyFilters([123])).toEqual([])
   })
 
-  it('条件数の上限(KEY_FILTER_MAX)で切る(論理木の膨張を防ぐ)', () => {
+  it('条件数の上限(KEY_FILTER_MAX)で切る(条件の膨張を防ぐ)', () => {
     const specs = Array.from({ length: KEY_FILTER_MAX + 3 }, (_, i) => `キー${i}|present`)
     expect(normalizeKeyFilters(specs)).toHaveLength(KEY_FILTER_MAX)
   })

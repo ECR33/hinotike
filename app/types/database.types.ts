@@ -1,7 +1,8 @@
 /**
  * 最小の手書き Database 型(supabase gen types が不要な環境でもモジュールが型解決できるように)。
- * supabase/migrations の users / items(レガシー) / user_email_domains / sync_sources(0007) /
+ * supabase/migrations の users / user_email_domains / sync_sources(0007) /
  * scan_modes・scan_events(0006 + 0008 の source_id)と一致させること。
+ * 旧 `items` と `sync_settings`(0001 / 0003〜0005)は 0009 で drop したため載せない。
  * 本番で正確な型が必要なら `supabase gen types typescript --local --schema public` で置き換える。
  */
 export type Database = {
@@ -34,24 +35,6 @@ export type Database = {
           created_at?: string
           linked_at?: string | null
           email_verified_at?: string | null
-        }
-        Relationships: []
-      }
-      items: {
-        Row: {
-          code: string
-          payload: Record<string, unknown>
-          imported_at: string
-        }
-        Insert: {
-          code: string
-          payload?: Record<string, unknown>
-          imported_at?: string
-        }
-        Update: {
-          code?: string
-          payload?: Record<string, unknown>
-          imported_at?: string
         }
         Relationships: []
       }
