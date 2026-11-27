@@ -66,6 +66,9 @@ describeFlow('QR許可: 依頼作成 → preview → approve → 登録 / 再利
 
     // 許可者(既存の登録済み利用者): 事前登録行 + 紐付け
     approverId = await createAuthUser(APPROVER_EMAIL)
+    await admin.auth.admin.updateUserById(approverId, {
+      user_metadata: { name: 'Approver Meta', picture: 'https://example.com/approver.png', sub: 'approver-sub-1' },
+    })
     await admin.from('users').insert({ email: APPROVER_EMAIL, name: 'approver' })
     const approver = await signInAs(APPROVER_EMAIL)
     expect((await approver.rpc('link_my_user')).error).toBeNull()
@@ -76,6 +79,10 @@ describeFlow('QR許可: 依頼作成 → preview → approve → 登録 / 再利
 
   it('未登録の認証ユーザは依頼を作成できる(nonce + 有効期限)', async () => {
     requesterId = await createAuthUser(REQUESTER_EMAIL)
+    // OAuth の profile 相当(Google の name/picture/sub)を metadata に載せて登録条件を再現する
+    await admin.auth.admin.updateUserById(requesterId, {
+      user_metadata: { name: 'Requester Meta', picture: 'https://example.com/requester.png', sub: 'requester-sub-1' },
+    })
     const requester = await signInAs(REQUESTER_EMAIL)
 
     const { data, error } = await requester.rpc('create_registration_request')
@@ -118,6 +125,19 @@ describeFlow('QR許可: 依頼作成 → preview → approve → 登録 / 再利
     const { data: ok } = await approver.rpc('preview_registration_request', { req_nonce: freshNonce })
     expect((ok as { status: string }).status).toBe('ok')
     expect((ok as { email: string }).email).toBe(REQUESTER_EMAIL)
+    expect((ok as { picture?: string }).picture).toBe('https://example.com/requester.png')
+  })
+
+  it('link_my_user は身分スナップショットを埋め、事前登録の name は上書きしない', async () => {
+    const { data: row } = await admin
+      .from('users')
+      .select('name, avatar_url, provider, provider_subject')
+      .eq('email', APPROVER_EMAIL)
+      .maybeSingle()
+    expect(row?.name).toBe('approver') // coalesce: 管理者が事前登録した name を保持
+    expect(row?.avatar_url).toBe('https://example.com/approver.png')
+    expect(row?.provider).toBe('email') // password 認証の provider は 'email'(Google OAuth では 'google')
+    expect(row?.provider_subject).toBe('approver-sub-1')
   })
 
   it('approve で users に紐付けられ、依頼者が登録済みになる', async () => {
@@ -132,11 +152,16 @@ describeFlow('QR許可: 依頼作成 → preview → approve → 登録 / 再利
 
     const { data: row } = await admin
       .from('users')
-      .select('auth_user_id, email, linked_at')
+      .select('auth_user_id, email, linked_at, name, avatar_url, provider, provider_subject')
       .eq('email', REQUESTER_EMAIL)
       .maybeSingle()
     expect(row?.auth_user_id).toBe(requesterId)
     expect(row?.linked_at).toBeTruthy()
+    // 身分スナップショット: リボーク時の見分け用に avatar / provider / sub が保管されている
+    expect(row?.name).toBe('Requester Meta')
+    expect(row?.avatar_url).toBe('https://example.com/requester.png')
+    expect(row?.provider).toBe('email') // password 認証の provider は 'email'(Google OAuth では 'google')
+    expect(row?.provider_subject).toBe('requester-sub-1')
 
     const { data: registered } = await requester.rpc('is_registered_user')
     expect(registered).toBe(true)

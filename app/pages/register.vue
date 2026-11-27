@@ -8,6 +8,7 @@ interface PreviewResult {
   status: string
   email?: string
   name?: string
+  picture?: string | null
 }
 interface ApproveResult {
   status: string
@@ -19,7 +20,7 @@ interface ApproveResult {
 // QrScanner は検出1回で停止するため、再スキャンは key の変更で再マウントする。
 const scannerKey = ref(0)
 const message = ref<string | null>(null)
-const preview = ref<{ email: string; name: string | null } | null>(null)
+const preview = ref<{ email: string; name: string | null; picture: string | null } | null>(null)
 const pendingCode = ref<string | null>(null)
 const busy = ref(false)
 const doneEmail = ref<string | null>(null)
@@ -43,7 +44,7 @@ async function onDetected(code: string) {
   try {
     const res = await $fetch<PreviewResult>('/api/approval-preview', { method: 'POST', body: { code } })
     if (res.status === 'ok') {
-      preview.value = { email: res.email ?? '', name: res.name || null }
+      preview.value = { email: res.email ?? '', name: res.name || null, picture: res.picture || null }
     } else {
       message.value = approvalStatusMessage(res.status)
       rescan()
@@ -88,9 +89,20 @@ async function approve() {
     </div>
 
     <div v-if="preview" class="card">
-      <p>
-        依頼者: <strong>{{ preview.email }}</strong>
-        <span v-if="preview.name">（{{ preview.name }}）</span>
+      <p class="requester-row">
+        <img
+          v-if="preview.picture"
+          class="requester-avatar"
+          :src="preview.picture"
+          alt=""
+          referrerpolicy="no-referrer"
+          loading="lazy"
+          @error="preview.picture = null"
+        >
+        <span>
+          依頼者: <strong>{{ preview.email }}</strong>
+          <span v-if="preview.name">（{{ preview.name }}）</span>
+        </span>
       </p>
       <p class="muted">この利用者を許可リスト(usersテーブル)に登録しますか?</p>
       <div class="action-row">
@@ -109,5 +121,17 @@ async function approve() {
   display: flex;
   gap: 8px;
   margin-top: 8px;
+}
+.requester-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.requester-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--bg, #eee);
 }
 </style>
