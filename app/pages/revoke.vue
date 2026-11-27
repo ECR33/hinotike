@@ -142,7 +142,7 @@ async function restore(user: UserRow) {
       </div>
 
       <div v-for="user in users" :key="user.id" class="card">
-        <p class="requester-row">
+        <div class="requester-row">
           <img
             v-if="user.avatar_url"
             class="requester-avatar"
@@ -151,11 +151,15 @@ async function restore(user: UserRow) {
             referrerpolicy="no-referrer"
             @error="user.avatar_url = null"
           >
-          <strong>{{ user.name ?? user.email }}</strong>
-          <span class="muted"> / {{ user.email }}</span>
-          <span v-if="user.email === myEmail" class="muted">(自分)</span>
-          <span v-if="user.can_purge" class="muted">(管理者)</span>
-        </p>
+          <div class="requester-main">
+            <div class="requester-name">
+              <strong>{{ user.name ?? user.email }}</strong>
+              <span v-if="user.email === myEmail" class="badge">自分</span>
+              <span v-if="user.can_purge" class="badge">管理者</span>
+            </div>
+            <div class="requester-email">{{ user.email }}</div>
+          </div>
+        </div>
         <p v-if="user.revoked_at" class="muted">
           リボーク済み: {{ user.revoked_at }}(by {{ user.revoked_by_email ?? 'can_purge利用者' }})
         </p>
@@ -174,10 +178,11 @@ async function restore(user: UserRow) {
 </template>
 
 <style scoped>
+/* 行は折り返さない: 画像 + (氏名とバッジの1行 / emailの1行)。長い名前は ellipsis で切る */
 .requester-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 10px;
 }
 .requester-avatar {
   width: 40px;
@@ -185,6 +190,39 @@ async function restore(user: UserRow) {
   border-radius: 50%;
   object-fit: cover;
   background: var(--bg, #eee);
+  flex: none;
+}
+.requester-main {
+  flex: 1;
+  min-width: 0;
+}
+.requester-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.requester-name strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.badge {
+  flex: none;
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px solid var(--border, #334155);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.requester-email {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .action-row {
   display: flex;
