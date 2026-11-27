@@ -192,7 +192,7 @@ const keysError = useState<string | null>('items-keys-error', () => null)
  * useOfflineState は onMounted で localStorage のメタを引き当てる(SSR は読めない)。
  * 一覧・facets・項目キーは端末内のミラー(**作業中のデータセット**の行)からローカルで解決する(通信しない)。
  */
-const { meta: offlineMeta } = useOfflineState()
+const { meta: offlineMeta, refreshMeta } = useOfflineState()
 /** 認証状態(SSR が埋め込む)。ミラーの uid と比較して別利用者の端末データの一覧表示を防ぐ。 */
 const authState = useState<MeState | null>('auth-state', () => null)
 
@@ -629,8 +629,11 @@ async function reloadAll(): Promise<void> {
   await loadKeys()
 }
 
-onMounted(() => {
+onMounted(async () => {
   ioSupported.value = typeof IntersectionObserver === 'function'
+  // 中央消去指示(0011)を先に apply(指示があればミラーは消えている = missing 判定になる)
+  await checkDevicePurge()
+  await refreshMeta()
   // SSR は storage を読めない(『読み込み中…』を描画)。マウントでこの端末のミラーの判定へ切り替えて解決する。
   resolveMirrorStatus()
   if (mirrorStatus.value === 'ready') void reloadAll()

@@ -84,6 +84,7 @@ const {
   localWork,
   uidMismatch,
   refreshQueueCount,
+  refreshMeta,
 } = useOfflineState()
 /** 認証状態(SSR が埋め込む)。ミラーの uid と比較して別ユーザのローカル作業を無効にする。 */
 const authState = useState<MeState | null>('auth-state', () => null)
@@ -186,7 +187,12 @@ function restoreMirrorState(): void {
   if (activeSourceId.value !== null && !workingLocally.value) void refreshConfigForSource(activeSourceId.value)
 }
 
-onMounted(() => restoreMirrorState())
+onMounted(async () => {
+  // 中央消去指示(0011)を先に apply してからミラー状態を読む(指示があればメタは消えている = 無効化側になる)
+  await checkDevicePurge()
+  await refreshMeta()
+  restoreMirrorState()
+})
 watch(localWork, (ok) => {
   if (ok) restoreMirrorState()
 })
@@ -396,6 +402,12 @@ async function flush() {
       }
     }
     flushNote.value = `${res.wrote}件をシートに書き込みました(${res.sheetTitle})${res.auditWritten ? '' : ' ※記録履歴の保存に失敗したぶんがあります(シートは保存済み)'}`
+    // flush は通信のタイミングなので中央消去指示(0011)もここで apply する
+    if (await checkDevicePurge()) {
+      await refreshMeta()
+      await refreshQueueCount()
+      restoreMirrorState()
+    }
   } catch (e: unknown) {
     errorMessage.value = describeError(e)
   } finally {
@@ -512,11 +524,14 @@ async function importDataset(source: SyncSource | null): Promise<void> {
     let cursor = ''
     let capped = false
     let sheetTitle = ''
+    // 取り込み時の purge_epoch(/api/import が応答に載せる。0011 の消去指示比較の基準)
+    let purgeEpoch = 0
     for (;;) {
       const page = await $fetch<ImportPageResponse>('/api/import', {
         query: { sourceId, limit: OFFLINE_PAGE_BATCH, ...(cursor ? { cursor } : {}) },
       })
       sheetTitle = page.sheetTitle
+      purgeEpoch = page.purgeEpoch ?? 0
       rows.push(...page.rows.map((r) => ({ code: r.code, payload: r.payload, sourceId })))
       prepProgress.value = `${rows.length}/${page.total ?? rows.length}件 を取り込み中…`
       if (!page.nextCursor) break
@@ -536,6 +551,7 @@ async function importDataset(source: SyncSource | null): Promise<void> {
       itemCount: rows.length,
       config: cfg,
       capped,
+      purgeEpoch,
     }
     await offlineSaveSnapshot(meta, rows)
     writeOfflineMetaToStorage(meta)
@@ -680,6 +696,13 @@ async function flushOfflineQueue() {
     // 成功注記は offlineNote(データセット欄に出す)。Banner はキュー 0 だと消えるので注記置き場にしない
     offlineNote.value =
       `確定: ${wrote}件をシートに書き込みました${skipped > 0 ? ` / 既に済だった ${skipped}件は書き込みませんでした` : ''}${failed > 0 ? ` / 失敗 ${failed}件は再確定できます` : ''}${offlineQueueCount.value > 0 ? ` / 端末に残り ${offlineQueueCount.value}件` : ''}`
+    // 確定は通信のタイミングなので中央消去指示(0011)もここで apply する(指示があればそのデータセットのミラーを捨てる)
+    if (await checkDevicePurge()) {
+      await refreshMeta()
+      await refreshQueueCount()
+      restoreMirrorState()
+      offlineNote.value = `${offlineNote.value} / イベント終了の消去指示が出ていたためこのデータセットの端末コピーを捨てました`
+    }
   } catch (e: unknown) {
     queueError.value = describeError(e)
   } finally {

@@ -47,6 +47,8 @@ const ICONS = {
   history: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 12l4.5-3',
   // 記録の設定: 2本のスライダー(モードの追加・変更・削除の設定画面)
   settings: 'M4 7h9 M17 7h3 M4 17h3 M11 17h9 M13 4.5v5 M7 14.5v5',
+  // 端末データの消去: ゴミ箱(中央消去指示。氏名・備考のコピーを端末から捨てる)
+  purge: 'M4 7h16 M9.5 7V5.5a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2V7 M6.5 7l.9 12a2 2 0 0 0 2 1.8h5.2a2 2 0 0 0 2-1.8l.9-12 M10 11v6 M14 11v6',
   // 管理: 横3点(ellipsis)。dropdown のトリガー
   menu: 'M5 12h.01 M12 12h.01 M19 12h.01',
 } as const
@@ -87,18 +89,20 @@ const items = computed<(NavItem | ManageItem)[]>(() => {
     home,
     { key: 'scan', label: 'QRスキャン', icon: 'scan', to: '/scan', activePaths: ['/scan', '/result'] },
     { key: 'items', label: '一覧', icon: 'list', to: '/items' },
-    // 管理系: アプリ共有(/share)・利用者登録(/register)・同期(/sync)・記録の設定(/scan-settings)・記録履歴(/records)・ログアウト
+    // 管理系: アプリ共有(/share)・利用者登録(/register)・同期(/sync)・記録の設定(/scan-settings)・記録履歴(/records)・
+    // 端末データの消去(/purge、can_purge の利用者だけ)= ログアウト
     {
       key: 'manage',
       label: '管理',
       icon: 'menu',
-      activePaths: ['/share', '/register', '/sync', '/scan-settings', '/records'],
+      activePaths: ['/share', '/register', '/sync', '/scan-settings', '/records', '/purge'],
       children: [
         { key: 'share', label: 'アプリ共有', icon: 'share', to: '/share' },
         { key: 'register', label: '利用者登録', icon: 'register', to: '/register' },
         { key: 'sync', label: '同期', icon: 'sync', to: '/sync' },
         { key: 'scan-settings', label: '記録の設定', icon: 'settings', to: '/scan-settings' },
         { key: 'records', label: '記録履歴', icon: 'history', to: '/records' },
+        ...(me.canPurge ? [{ key: 'purge', label: '端末データの消去', icon: 'purge' as const, to: '/purge' }] : []),
         logoutItem,
       ],
     },

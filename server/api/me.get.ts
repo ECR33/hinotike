@@ -27,7 +27,7 @@ export default defineEventHandler(async (event) => {
   const supabase = await serverSupabaseClient(event)
   const { data, error } = await supabase
     .from('users')
-    .select('id, email, name')
+    .select('id, email, name, can_purge')
     .eq('auth_user_id', uid)
     .maybeSingle()
 
@@ -41,5 +41,7 @@ export default defineEventHandler(async (event) => {
     authorized: data != null,
     email: user.email ?? data?.email ?? null,
     uid,
+    // 端末データの消去指示を出せるか(0011。管理 dropdown の「端末データの消去」の出し分け用)
+    canPurge: data?.can_purge === true,
   }
 })

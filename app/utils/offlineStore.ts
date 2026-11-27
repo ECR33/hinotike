@@ -282,6 +282,32 @@ export function clearActiveSourceStorage(): void {
 }
 
 /**
+ * **1データセットの端末コピーだけを捨てる**(0011 の中央消去指示の apply。`useDevicePurge` が呼ぶ)。
+ * - items からその sourceId の行を消す(他データセットの行は温存)
+ * - メタがそのデータセットなら snapshot と localStorage のメタを消す(別のデータセットのメタは温存)
+ * - その source の queue entry は**氏名だけ除去**して code / modeId / at を残す(記録は確定できる)
+ * - 「作業中のデータセット」選択がその sourceId なら消す
+ * - SW のページ缓存は全体を消す(缓存 HTML に氏名が載る。データセット単位で缓存を分けないので保守側)
+ */
+export async function offlinePurgeSource(sourceId: number): Promise<{ purgedRows: number; strippedNames: number }> {
+  const rows = await offlineGetAllItems(sourceId)
+  const meta = await offlineReadMeta()
+  const queue = await offlineListQueue()
+  const named = queue.filter((e) => e && e.sourceId === sourceId && typeof e.name === 'string' && e.name !== '')
+  await offlineReadWrite([OFFLINE_ITEMS_STORE, OFFLINE_SNAPSHOT_STORE, OFFLINE_QUEUE_STORE], (tx) => {
+    const items = tx.objectStore(OFFLINE_ITEMS_STORE)
+    for (const row of rows) items.delete(datasetKey(sourceId, row.code))
+    if (meta && meta.sourceId === sourceId) tx.objectStore(OFFLINE_SNAPSHOT_STORE).delete(OFFLINE_SNAPSHOT_KEY)
+    const q = tx.objectStore(OFFLINE_QUEUE_STORE)
+    for (const e of named) q.put({ ...e, name: null }, e.id)
+  })
+  if (meta && meta.sourceId === sourceId) clearOfflineMetaStorage()
+  if (readActiveSourceFromStorage() === sourceId) clearActiveSourceStorage()
+  await offlineClearPageCache()
+  return { purgedRows: rows.length, strippedNames: named.length }
+}
+
+/**
  * **この端末の個人データをまとめて捨てる**(ログアウトと「端末のデータを完全に削除」で呼ぶ)。
  * - `items` / `snapshot` のミラー(氏名・備考・任意 payload を含む)を消す
  * - localStorage のメタ(`hinotike-offline-meta`)と「作業中のデータセット」(`hinotike-active-source`)を消す

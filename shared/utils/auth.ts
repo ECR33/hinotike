@@ -14,6 +14,11 @@ export interface MeState {
    * (`shared/utils/offline.ts` の `mirrorBelongsToUser`)。未認証は null。
    */
   uid: string | null
+  /**
+   * 端末データの消去指示を出せる利用者か(0011 の users.can_purge)。
+   * 未認証・未登録・オフラインフォールバックは undefined(false 扱い)。
+   */
+  canPurge?: boolean
 }
 
 /**

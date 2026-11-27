@@ -13,11 +13,22 @@ import { datasetFromSource, requireSource } from '../utils/dataset'
  * 同じシート読みを打ち直さない(importedAt はその読み取りの基準日時)。
  */
 export default defineEventHandler(async (event): Promise<ImportPageResponse> => {
-  await requireRegisteredUser(event)
+  const { supabase } = await requireRegisteredUser(event)
 
   const query = getQuery(event)
   const source = await requireSource(event, query.sourceId)
   const dataset = await datasetFromSource(event, source)
+
+  // 消去指示の現在 epoch(0011)。取り込みメタに写す基準になる(取り込み自体は指示と無関係に走る —
+  // イベント終了後の再取り込み = 新しいイベントなので、現在 epoch をそのまま写す)
+  const { data: epochRow, error: epochError } = await supabase
+    .from('sync_sources')
+    .select('purge_epoch')
+    .eq('id', source.id ?? 0)
+    .maybeSingle()
+  if (epochError) {
+    console.error('[import] purge_epoch lookup:', epochError.message)
+  }
 
   const offsetRaw = typeof query.cursor === 'string' ? Number(query.cursor) : 0
   const offset = Number.isInteger(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0
@@ -36,5 +47,6 @@ export default defineEventHandler(async (event): Promise<ImportPageResponse> => 
     filtered: dataset.filtered,
     truncated: dataset.truncated,
     importedAt: new Date(dataset.index.fetchedAt).toISOString(),
+    purgeEpoch: epochRow?.purge_epoch ?? 0,
   }
 })

@@ -127,6 +127,12 @@ export interface OfflineMeta {
   config: ScanConfigResponse
   /** 上限 OFFLINE_ITEM_MAX で打ち切ったダウンロードなら true(全件ではない旨の注記を出す) */
   capped?: boolean
+  /**
+   * 取り込み時のデータセットの purge_epoch(/api/import の応答から写す。0011 の中央消去指示)。
+   * 端末は現在 epoch(/api/purge-state)がこれより大きければそのミラーを捨てる。
+   * 旧形(無いメタ)は 0 扱い = 指示(epoch>=1)ですぐ捨てられる(保守側)。
+   */
+  purgeEpoch?: number
 }
 
 /** 記録の1読み取りの待機(IndexedDB の queue ストアの行。復旧後にフラッシュする)。 */
@@ -218,6 +224,10 @@ export function parseOfflineMeta(raw: string | null | undefined): OfflineMeta | 
       sheetHeaders: Array.isArray(config.sheetHeaders) ? config.sheetHeaders.filter((c) => typeof c === 'string') : null,
     },
     capped: o.capped === true,
+    // purge_epoch は欠け・不正値は 0(保守側: 指示は epoch>=1 なので旧メタも消去対象になる)
+    purgeEpoch: typeof o.purgeEpoch === 'number' && Number.isInteger(o.purgeEpoch) && o.purgeEpoch >= 0
+      ? o.purgeEpoch
+      : 0,
   }
 }
 

@@ -2,6 +2,7 @@
  * 最小の手書き Database 型(supabase gen types が不要な環境でもモジュールが型解決できるように)。
  * supabase/migrations の users / user_email_domains / sync_sources(0007) /
  * scan_modes・scan_events(0006 + 0008 の source_id)と一致させること。
+ * users の avatar_url / provider / provider_subject は 0010(登録時の身分スナップショット)。
  * 旧 `items` と `sync_settings`(0001 / 0003〜0005)は 0009 で drop したため載せない。
  * 本番で正確な型が必要なら `supabase gen types typescript --local --schema public` で置き換える。
  */
@@ -17,6 +18,11 @@ export type Database = {
           created_at: string
           linked_at: string | null
           email_verified_at: string | null
+          avatar_url: string | null
+          provider: string | null
+          provider_subject: string | null
+          /** 端末データの消去指示を出せるか(0011)。最初期ユーザの事前登録 insert で true を入れる */
+          can_purge: boolean
         }
         Insert: {
           id?: string
@@ -26,6 +32,10 @@ export type Database = {
           created_at?: string
           linked_at?: string | null
           email_verified_at?: string | null
+          avatar_url?: string | null
+          provider?: string | null
+          provider_subject?: string | null
+          can_purge?: boolean
         }
         Update: {
           id?: string
@@ -35,6 +45,10 @@ export type Database = {
           created_at?: string
           linked_at?: string | null
           email_verified_at?: string | null
+          avatar_url?: string | null
+          provider?: string | null
+          provider_subject?: string | null
+          can_purge?: boolean
         }
         Relationships: []
       }
@@ -64,6 +78,8 @@ export type Database = {
           created_at: string
           updated_at: string
           updated_by: string | null
+          /** 消去指示の単調カウンタ(0011)。取り込みメタの epoch より大きければ端末はミラーを捨てる */
+          purge_epoch: number
         }
         Insert: {
           id?: number
@@ -80,6 +96,7 @@ export type Database = {
           created_at?: string
           updated_at?: string
           updated_by?: string | null
+          purge_epoch?: number
         }
         Update: {
           id?: number
@@ -96,6 +113,7 @@ export type Database = {
           created_at?: string
           updated_at?: string
           updated_by?: string | null
+          purge_epoch?: number
         }
         Relationships: []
       }
@@ -186,6 +204,30 @@ export type Database = {
         }
         Relationships: []
       }
+      /** 消去指示の監査(0011。select/insert のみ = 証跡は不変。insert は RPC のみ) */
+      purge_events: {
+        Row: {
+          seq: number
+          id: string
+          source_id: number | null
+          actor_email: string | null
+          issued_by: string | null
+          at: string
+        }
+        Insert: {
+          source_id?: number | null
+          actor_email?: string | null
+          issued_by?: string | null
+          at?: string
+        }
+        Update: {
+          source_id?: number | null
+          actor_email?: string | null
+          issued_by?: string | null
+          at?: string
+        }
+        Relationships: []
+      }
     }
     Views: Record<string, never>
     Functions: {
@@ -196,6 +238,8 @@ export type Database = {
       create_registration_request: { Args: Record<string, never>; Returns: Record<string, unknown> }
       preview_registration_request: { Args: { req_nonce: string }; Returns: Record<string, unknown> }
       approve_registration_request: { Args: { req_nonce: string }; Returns: Record<string, unknown> }
+      /** 端末データの消去指示(migrations/0011)。can_purge ガード。jsonb を返す(status / purge_epoch) */
+      issue_dataset_purge: { Args: { p_source_id: number }; Returns: Record<string, unknown> }
     }
     Enums: Record<string, never>
     CompositeTypes: Record<string, never>

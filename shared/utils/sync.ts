@@ -462,6 +462,8 @@ export interface ImportPageResponse {
   truncated: boolean
   /** この取り込みの基準日時(ISO。シート索引のキャッシュと同じ読み取りを指す) */
   importedAt: string
+  /** このデータセットの現在の purge_epoch(0011。画面は取り込みメタに写して消去指示の比較に使う) */
+  purgeEpoch: number
 }
 
 /** セット番号 → A1 の列表記(0基点: 0='A', 25='Z', 26='AA')。 */
