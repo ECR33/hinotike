@@ -163,6 +163,18 @@ QR読み取りを「照会」ではなく「記録」にも使えるようにす
 - コード照会用のQR(チケットの値)とは namespace が別(`hinotike-registration:` 接頭辞)。
   `/scan` で登録QRをスキャンすると「利用者登録用のQRです」の案内が出て記録しない(端末ミラーには見つからないだけ)。`/register` でチケットのコードを送ると 400。
 - ドメイン制限(任意): `user_email_domains` に行がある場合はそのドメインのみ紐付け許可。0 行 = 制限なし。
+- スナップショット(0010)は**紐付けの瞬間**に埋める(`link_my_user` は `auth_user_id is null` の行だけ更新)。
+  0010 適用**前にすでに紐付け済み**だった行は自動では埋まらないので、1回だけ backfill を実行する:
+  ```sql
+  update public.users u
+     set avatar_url = coalesce(u.avatar_url, au.raw_user_meta_data ->> 'picture'),
+         provider = coalesce(u.provider, au.raw_app_meta_data ->> 'provider'),
+         provider_subject = coalesce(u.provider_subject, au.raw_user_meta_data ->> 'sub')
+  from auth.users au
+  where au.id = u.auth_user_id and u.avatar_url is null and u.provider is null;
+  ```
+  (Google の sub は `raw_user_meta_data ->> 'sub' / 'provider_id'` にある — 関数も同じ場所を読む。
+  本番では 0010 適用前に紐付け済みだった行(管理者行)に 2026-11-28 にこの 1回 backfill を実行済み)
 
 ### C. リボーク(ログイン権の無効化。0012)
 `can_purge` の利用者が **`/revoke` 画面**(管理 dropdown に表示される)から他の利用者のログイン権を無効化できる。
