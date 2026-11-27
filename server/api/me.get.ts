@@ -27,7 +27,7 @@ export default defineEventHandler(async (event) => {
   const supabase = await serverSupabaseClient(event)
   const { data, error } = await supabase
     .from('users')
-    .select('id, email, name, can_purge')
+    .select('id, email, name, can_purge, revoked_at')
     .eq('auth_user_id', uid)
     .maybeSingle()
 
@@ -38,10 +38,11 @@ export default defineEventHandler(async (event) => {
 
   return {
     authenticated: true,
-    authorized: data != null,
+    // リボークされた行(0012)は「未登録」扱い(middleware が /unauthorized へ誘導する)
+    authorized: data != null && data.revoked_at == null,
     email: user.email ?? data?.email ?? null,
     uid,
-    // 端末データの消去指示を出せるか(0011。管理 dropdown の「端末データの消去」の出し分け用)
-    canPurge: data?.can_purge === true,
+    // 端末データの消去指示・リボークを出せるか(0011/0012。revoked 利用者は false)
+    canPurge: data?.can_purge === true && data.revoked_at == null,
   }
 })

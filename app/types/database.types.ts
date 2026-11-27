@@ -23,6 +23,9 @@ export type Database = {
           provider_subject: string | null
           /** 端末データの消去指示を出せるか(0011)。最初期ユーザの事前登録 insert で true を入れる */
           can_purge: boolean
+          /** ログイン権限のリボーク(0012)。null = 有効。revoked の行は is_registered_user() が false → 全アクセス拒否 */
+          revoked_at: string | null
+          revoked_by: string | null
         }
         Insert: {
           id?: string
@@ -36,6 +39,8 @@ export type Database = {
           provider?: string | null
           provider_subject?: string | null
           can_purge?: boolean
+          revoked_at?: string | null
+          revoked_by?: string | null
         }
         Update: {
           id?: string
@@ -49,6 +54,8 @@ export type Database = {
           provider?: string | null
           provider_subject?: string | null
           can_purge?: boolean
+          revoked_at?: string | null
+          revoked_by?: string | null
         }
         Relationships: []
       }
@@ -240,6 +247,12 @@ export type Database = {
       approve_registration_request: { Args: { req_nonce: string }; Returns: Record<string, unknown> }
       /** 端末データの消去指示(migrations/0011)。can_purge ガード。jsonb を返す(status / purge_epoch) */
       issue_dataset_purge: { Args: { p_source_id: number }; Returns: Record<string, unknown> }
+      /** リボーク画面の利用者一覧(migrations/0012)。can_purge ガード。jsonb を返す(status / users[]) */
+      list_users: { Args: Record<string, never>; Returns: Record<string, unknown> }
+      /** ログイン権限のリボーク(migrations/0012)。can_purge ガード。jsonb を返す(status / email) */
+      revoke_user: { Args: { p_email: string }; Returns: Record<string, unknown> }
+      /** リボークの解除(migrations/0012)。can_purge ガード。jsonb を返す(status / email) */
+      restore_user: { Args: { p_email: string }; Returns: Record<string, unknown> }
     }
     Enums: Record<string, never>
     CompositeTypes: Record<string, never>

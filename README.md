@@ -21,6 +21,7 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
 | `/share` | 必要(登録済み) | アプリ共有: アプリのトップURLのQRを表示。別のスマホのカメラ/QRリーダーで読むとトップが開き、未登録なら許可依頼フロー(/unauthorized)へ自動接続される。QRはドットスタイル描画(`app/components/QrDots.vue`、qrcode-vue3 の dot style 参考。既存の qrcode ライブラリの BitMatrix を SVG に描き直すだけ。finder は走査線比率 1:1:3:1:1 を保つ rounded 形なので jsQR/zxing/native リーダーで読める) |
 | `/sync` | 必要(登録済み) | **データセット(取り込み定義)の管理画面**: 複数のスプレッドシートを定義として保存(追加・編集・削除)→ 1つのシートをプレビュー → 選んだデータを**この端末に取り込み**。データ本体は Supabase に置かない(シートが唯一の正。設計: `docs/datasets.md`) |
 | `/purge` | 必要(登録済み + `can_purge`) | **端末データの消去指示**: スキャンのイベント終了をデータセットごとに中央(DB)へ宣言する。`sync_sources.purge_epoch` を +1 し監査行(`purge_events`)を残す。各端末は次回通信でそのデータセットの端末コピー(氏名・備考)を捨てる(設計: `docs/purge-design.md`)。表示と発動は `users.can_purge` の利用者だけ |
+| `/revoke` | 必要(登録済み + `can_purge`) | **ログイン権限のリボーク**: 利用者一覧(スナップショット付き)から他の利用者のログイン権を無効化/解除する。`users.revoked_at` の soft revoke で `is_registered_user()` が全アクセスを即拒否(0012。自分のリボークは拒否、再許可は QR 承認 or restore) |
 
 ### Bottom navigation(`app/components/BottomNav.vue`)
 
@@ -30,7 +31,7 @@ Nuxt 4 + Supabase + Google 認証の QR 照会 Web アプリの雛形。
 |---|---|
 | 未認証 | トップ / ログイン(`/login`) |
 | 認証済み・未登録 | トップ / 許可依頼(`/unauthorized`) / 管理(dropdown: ログアウト) |
-| 認証済み・許可済み | トップ / QRスキャン(`/scan`) / 一覧(`/items`) / 管理(dropdown: アプリ共有`/share`・利用者登録`/register`・同期`/sync`・記録の設定`/scan-settings`・記録履歴`/records`・端末データの消去`/purge`(`can_purge` の利用者だけ表示)・ログアウト) |
+| 認証済み・許可済み | トップ / QRスキャン(`/scan`) / 一覧(`/items`) / 管理(dropdown: アプリ共有`/share`・利用者登録`/register`・同期`/sync`・記録の設定`/scan-settings`・記録履歴`/records`・端末データの消去`/purge`とログイン権のリボーク`/revoke`(`can_purge` の利用者だけ表示)・ログアウト) |
 
 - 管理系項目は「管理」ボタンの dropdown menu にまとめて常駐バーの項目数を抑える(dropdown はバーの上に開く。外側クリック / Escape / ルート変更で閉じる。格納先ルート(`/share`・`/register`・`/sync`・`/scan-settings`・`/records`)にいるとき「管理」が点灯し、menu 内の現ページは `aria-current="page"`)。許可依頼は未登録ユーザの主動作なのでバーに直接残す。
 - ログアウトはルートではなく action(`useLogout()` → `POST /api/logout` → `/`)。ページ内の「ログアウト」ボタンは重複なので撤去した(`/index`・`/login`・`/scan`・`/register`・`/unauthorized`)。バー時代のログアウトは dropdown 内(dropdown 項目は route を変わらないので選択時に自前で閉じる)。
@@ -163,15 +164,19 @@ QR読み取りを「照会」ではなく「記録」にも使えるようにす
   `/scan` で登録QRをスキャンすると「利用者登録用のQRです」の案内が出て記録しない(端末ミラーには見つからないだけ)。`/register` でチケットのコードを送ると 400。
 - ドメイン制限(任意): `user_email_domains` に行がある場合はそのドメインのみ紐付け許可。0 行 = 制限なし。
 
-### C. リボーク(許可リストからの除去)
-対象の `users` 行を削除する(ダッシュボードの Authentication → Users から auth ユーザを削除、または SQL Editor で行削除)。
-登録時に身分スナップショットを保管しているので、行を見れば「誰か」が素見分けできる(0010):
-- `name` / `email`: 登録時の表示名(Google profile の name)と検証済み email
-- `avatar_url`: Google プロフィール画像の URL(承認画面にも表示される)
-- `provider` / `provider_subject`: 認証プロバイダとその account id(Google の sub は email 変更でも安定なので、
-  リボーク後も Google Workspace / Admin Console のユーザと照合できる)
-注意: auth ユーザを削除すると cascade で `users` 行も消える(スナップショットも一緒に消える)。
-リボーク後に記録を残したい場合は、削除前に当該行の email / name / provider_subject を控えておく。
+### C. リボーク(ログイン権の無効化。0012)
+`can_purge` の利用者が **`/revoke` 画面**(管理 dropdown に表示される)から他の利用者のログイン権を無効化できる。
+行を「消す」のではなく `users.revoked_at` / `revoked_by` を立てる **soft revoke** にする:
+- RLS と guard の共通根 `is_registered_user()` が revoked 行を除外 → 全画面・APIが即座に拒否され、
+  その利用者は `/unauthorized`(許可依頼の案内)になる。解除(restore)も同じ画面から。
+- users 行と登録時の身分スナップショットが残るので「誰だったか」が監査として読める(0010):
+  `name` / `email`(登録時の表示名と検証済み email)、`avatar_url`(Google プロフィール画像)、
+  `provider` / `provider_subject`(Google の sub は email 変更でも安定なので Workspace のユーザと照合できる)。
+- 自分のリボークは `forbidden_self` で拒否(唯一のスーパーユーザのセルフロックアウト防止)。
+- リボーク後に `link_my_user()` で自動復活しない。再許可は QR 承認(人間の承認。revoked 行を un-revoke する)
+  またはスーパーユーザの restore のみ。
+- auth ユーザごと消したい(_hard delete_)場合は従来どおりダッシュボードから auth ユーザを削除(cascade で users 行も消える)。
+  記録を残したいなら削除前に当該行の email / name / provider_subject を控えておく。
 
 ### D. 端末データの消去指示(0011、設計: `docs/purge-design.md`)
 コントロールパネルの代わりに**Supabase DB が中央**。指示はデータセット単位で、`sync_sources.purge_epoch`(単調カウンタ)を +1 する:
@@ -196,7 +201,7 @@ QR読み取りを「照会」ではなく「記録」にも使えるようにす
    - 開発ホスト許可は `DEV_ALLOWED_HOSTS` / `NUXT_VITE_ALLOWED_HOST`(nuxt.config にホストをハードコードしない)
    - アプリサーバーは Secret key を使わない(データ本体のテーブルは撤去済み — 取り込み定義 `sync_sources` と記録 `scan_modes`/`scan_events` は RLS の `is_registered_user()` で許可する。Secret key は CLI のシート dump / 定義の読み取りだけ。高権限なので Worker に置かない)
 3. Supabase 側:
-   - `supabase/migrations/` の 0001 → 0002 → 0003 → 0004 → 0005 → 0006 → 0007 → 0008 → 0009 → 0010 → 0011 を SQL Editor でこの順に実行(users / ドメイン表 / RLS と関数 + 許可依頼の依頼テーブルと RPC + スキャンの記録モード `scan_modes`(シード2モード)と証跡 `scan_events`(select/insert のみ)+ 取り込み定義 `sync_sources`(複数行・シード行)+ 記録モードのデータセット紐づけ(`scan_modes.source_id` / `scan_events.source_id`)+ **レガシーの drop**(データ本体のテーブルと旧の同期設定の singleton 行。0003〜0005 のファイルは履歴整合のため残す)+ **身分スナップショット**(users の `avatar_url` / `provider` / `provider_subject` と link/preview/approve 関数の更新)+ **端末データの消去指示**(users の `can_purge`・`sync_sources.purge_epoch`・監査 `purge_events`・RPC `issue_dataset_purge`)。関数が RLS ポリシーより先に作成される順になっている
+   - `supabase/migrations/` の 0001 → 0002 → 0003 → 0004 → 0005 → 0006 → 0007 → 0008 → 0009 → 0010 → 0011 → 0012 を SQL Editor でこの順に実行(users / ドメイン表 / RLS と関数 + 許可依頼の依頼テーブルと RPC + スキャンの記録モード `scan_modes`(シード2モード)と証跡 `scan_events`(select/insert のみ)+ 取り込み定義 `sync_sources`(複数行・シード行)+ 記録モードのデータセット紐づけ(`scan_modes.source_id` / `scan_events.source_id`)+ **レガシーの drop**(データ本体のテーブルと旧の同期設定の singleton 行。0003〜0005 のファイルは履歴整合のため残す)+ **身分スナップショット**(users の `avatar_url` / `provider` / `provider_subject` と link/preview/approve 関数の更新)+ **端末データの消去指示**(users の `can_purge`・`sync_sources.purge_epoch`・監査 `purge_events`・RPC `issue_dataset_purge`)+ **ログイン権のリボーク**(users の `revoked_at` / `revoked_by` と `is_registered_user()` の revoked 除外・link/preview/approve の revoked 扱い・RPC `list_users` / `revoke_user` / `restore_user`)。関数が RLS ポリシーより先に作成される順になっている
      - 旧スキーマからの移行は `supabase/migrations/0009_drop_legacy.sql` がデータ本体のテーブルと旧の同期設定のテーブルを drop する(旧データの復元はしない — シートが唯一の正なので、データは取り込みで端末に置く)
    - Authentication → Third-party providers → Google を有効化
    - Authentication → URL Configuration:
@@ -304,7 +309,7 @@ npm run supabase:stop
 - `npm run dev` は `nuxt dev --dotenv .env.development` でローカル Supabase の dev デフォルトキーを読み、本番用の `.env` は dev では使わない(hosted Supabase の認証テストをしたいときは shell の env 変数で上書きできる)。
 - スキーマは start/reset で `supabase/migrations/*.sql`(0001→…→0009 の順)が自動適用される。ホスト版には同じファイルを Dashboard の SQL Editor で流す(`supabase/schema.sql` は作らない)。hosted への `db push` は `npx supabase db push --remote=<project-ref>` で、**Supabase の access token(SUPABASE_ACCESS_TOKEN)が必要**。hosted の SQL Editor は token を使わず同じ SQL をそのまま実行できる
   hosted への `db push` は `npx supabase db push --remote=<project-ref>` で、**Supabase の access token(scoped: database_write)か DB のパスワード(`--password`)が必要**(service_role key では DB に繋がらない)。まず `--dry-run` で適用されるマイグレーションを確認する。
-- 統合テスト: `npm run test:local`(email 事前登録 → 初回ログインの `link_my_user()` 自動紐付け → `is_registered_user()` / ドメイン制限 / **取り込み定義 `sync_sources` の RLS** を確認。旧「データ本体テーブルの閲覧・キー絞り込み」のテストは撤去した(テーブルが無い)。QR許可フロー(`registration_requests` の作成→preview→approve→consumed・再利用拒否)もローカル Supabase で実行する。中央消去指示フロー(`issue_dataset_purge` の can_purge ガード → epoch +1 → 監査 `purge_events` の RLS)も実行する。env がなければ自動スキップ
+- 統合テスト: `npm run test:local`(email 事前登録 → 初回ログインの `link_my_user()` 自動紐付け → `is_registered_user()` / ドメイン制限 / **取り込み定義 `sync_sources` の RLS** を確認。旧「データ本体テーブルの閲覧・キー絞り込み」のテストは撤去した(テーブルが無い)。QR許可フロー(`registration_requests` の作成→preview→approve→consumed・再利用拒否)もローカル Supabase で実行する。中央消去指示フロー(`issue_dataset_purge` の can_purge ガード → epoch +1 → 監査 `purge_events` の RLS)も実行する。リボークフロー(`list_users`/`revoke_user`/`restore_user` の can_purge ガード → `is_registered_user()` false → 自分のリボーク拒否 → restore → QR承認での再許可(un-revoke))も実行する。env がなければ自動スキップ
 - **ローカルでは Google OAuth は使えない**(ローカル gotrue はサードパーティプロバイダ非対応)。UI 検証は dev 限定のパスワードログインで行う:
   ```bash
   npm run supabase:dev-user          # 許可側テストユーザ(users 事前登録行あり)→ dev ログインで /scan に直达
