@@ -144,7 +144,18 @@ const router = useRouter()
 const offAfterEach = router.afterEach((to, from) => {
   if (to.path === '/scan' && from && from.path !== '/scan') remountScanner()
 })
-onBeforeUnmount(() => offAfterEach())
+// keepalive の /scan は画面を遷移しても unmount されず deactivate されるだけなので、
+// QrScanner の onBeforeUnmount が走らずカメラが裏で動き続ける(track が live のままだった)。
+// 去る時に stop する(ユーザーの「スキャン停止」とは違い userStopped を立てないので、
+// 戻った時の afterEach の再マウントで自動再開される — 照会→/result の往復の動作はそのまま)。
+const scannerRef = ref<{ stop: () => void } | null>(null)
+const offBeforeLeave = router.beforeEach((to, from) => {
+  if (from && from.path === '/scan' && to.path !== '/scan') scannerRef.value?.stop()
+})
+onBeforeUnmount(() => {
+  offAfterEach()
+  offBeforeLeave()
+})
 
 const session = useState<SessionEntry[]>('scan-session', () => [])
 const pending = useState<ScanCheckResponse | null>('scan-pending', () => null)
@@ -836,6 +847,7 @@ const activeMissingColumns = computed(() =>
          カメラ枠の内側(右上)にまとめている(app/components/QrScanner.vue) -->
     <div class="card">
       <QrScanner
+        ref="scannerRef"
         :key="scannerKey"
         :continuous="recording"
         :busy="busy || (recording && pending !== null)"

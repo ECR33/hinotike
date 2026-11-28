@@ -271,6 +271,12 @@ onBeforeUnmount(() => {
   stop()
 })
 
+// keepalive のページ(/scan)から画面を遷移するとこの component は unmount されず
+// deactivate されるだけなので、onBeforeUnmount が走らない。そのままだと camera の
+// track が live のまま(画面を遷移しても裏で映像を取り続けていた)。親画面の遷移 guard
+// (app/pages/scan.vue の router.beforeEach)から stop を呼ぶための口。
+defineExpose({ stop })
+
 // 画面を戻った後の自動再開は `app/pages/scan.vue` の route watcher が scanner の再マウントで
 // 扱う(keepalive の再 activated だけでは video の ref とライブラリの実体がズレて映像が流れない
 // ことがあった。再マウントは既存の「記録モードの切替で再マウント」と同じ導線で一貫する)。
